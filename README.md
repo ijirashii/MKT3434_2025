@@ -109,3 +109,184 @@ You can install all dependencies by running:
 
 ```bash
 pip install -r requirements.txt
+
+
+#####################################################################################################
+
+# Machine Learning GUI - MKT3434 Homework-2 🚀
+
+This second homework extends the initial GUI developed in Homework-1.  
+The goal was to enrich the system with **advanced dimensionality reduction**, **clustering**, **evaluation**, and **interactive visualization** features — critical for real-world robotics and mechatronics applications! 🤖✨
+
+---
+
+## 🌟 New Features
+
+### 1. **Dimensionality Reduction and Visualization Tab**
+- A brand new tab for dimensionality reduction and data visualization!
+- Interactive 2D/3D projection support.
+
+🖼️ **Screenshot:**  
+![Dimensionality Reduction Tab](screenshots/homework2_dimensionality_tab1.png)
+![Dimensionality Reduction Tab](screenshots/homework2_dimensionality_tab2.png)
+![Dimensionality Reduction Tab](screenshots/homework2_dimensionality_tab3.png)
+![Dimensionality Reduction Tab](screenshots/homework2_dimensionality_tab4.png)
+![Dimensionality Reduction Tab](screenshots/homework2_dimensionality_tab5.png)
+![Dimensionality Reduction Tab](screenshots/homework2_dimensionality_tab6.png)
+
+---
+
+### 2. **Principal Component Analysis (PCA)**
+- Select the number of components manually.
+- View explained variance ratio plots to guide selection.
+
+📈 **Screenshot:**  
+![PCA Explained Variance](screenshots/homework2_pca_variance1.png)
+![PCA Explained Variance](screenshots/homework2_pca_variance2.png)
+![PCA Explained Variance](screenshots/homework2_pca_variance3.png)
+
+🔍 **Logic:**  
+PCA projects the data into a lower-dimensional space by maximizing variance.  
+Explained variance shows how much information each principal component retains.
+
+---
+
+### 3. **Linear Discriminant Analysis (LDA)**
+- Supervised dimensionality reduction using class labels.
+- Visualizes clear class separations in 2D.
+
+🎨 **Screenshot:**  
+![LDA Projection](screenshots/homework2_lda_projection1.png)
+![LDA Projection](screenshots/homework2_lda_projection2.png)
+![LDA Projection](screenshots/homework2_lda_projection3.png)
+![LDA Projection](screenshots/homework2_lda_projection4.png)
+
+🔍 **Logic:**  
+LDA maximizes class separability while reducing dimensions — perfect for classification tasks!
+
+---
+
+### 4. **k-Means Clustering with Elbow Method**
+- User-selectable number of clusters (k).
+- Visualize optimal cluster number using the elbow method.
+- Evaluate clustering quality with Silhouette Score and Davies–Bouldin Index.
+
+🖼️ **Screenshots:**  
+- ![k Input](screenshots/homework2_k_input1.png)
+- ![k Input](screenshots/homework2_k_input2.png)
+- ![Elbow Method Plot](screenshots/homework2_elbow_method1.png)
+- ![Elbow Method Plot](screenshots/homework2_elbow_method2.png)
+- ![Cluster Visualization and Metrics](screenshots/homework2_clustered_data1.png)
+- ![Cluster Visualization and Metrics](screenshots/homework2_clustered_data2.png)
+- ![Cluster Visualization and Metrics](screenshots/homework2_clustered_data3.png)
+
+🔍 **Logic:**  
+The elbow point helps determine the best k.  
+Clustering metrics validate cluster quality.
+
+---
+
+### 📊 Clustering Quality Comparison
+
+| k | Silhouette Score | Davies–Bouldin Index |
+|---|------------------|----------------------|
+| 2 | 0.61             | 0.54                 |
+| 3 | 0.68             | 0.45                 |
+| 4 | 0.59             | 0.50                 |
+| 5 | 0.55             | 0.60                 |
+
+🏆 **Best Clustering:** **k = 3**  
+- Highest Silhouette Score  
+- Lowest Davies–Bouldin Index
+
+---
+
+### 5. **t-SNE and UMAP Projections**
+- Apply t-SNE and UMAP for nonlinear dimensionality reduction.
+- Tune perplexity, neighbors, and min_dist interactively.
+- Explore 2D and 3D plots!
+
+🖼️ **Screenshots:**  
+- ![t-SNE 2D Projection](screenshots/homework2_tsne_2d.png)
+- ![UMAP 3D Projection](screenshots/homework2_umap_3d.png)
+
+🔍 **Logic:**  
+t-SNE captures local structure but is slow; UMAP provides faster, scalable embeddings.
+
+---
+
+### 6. **Manual Eigenvector Computation and 1D Projection**
+- Computed eigenvectors manually for:
+  \[
+  \Sigma = \begin{bmatrix} 5 & 2 \\ 2 & 3 \end{bmatrix}
+  \]
+- Projected data onto 1D using the principal eigenvector.
+
+🖼️ **Screenshots:**  
+- ![Eigenvector Calculation](screenshots/homework2_eigenvector_calc.png)
+
+🔍 **Logic:**  
+Principal eigenvectors capture the most important variance directions in the data.
+
+---
+
+### 7. **Flexible Train/Validation/Test Split**
+- Different dataset splits now supported: (e.g., 70%-15%-15%, 80%-10%-10%).
+
+🖼️ **Screenshot:**  
+![Split Options](screenshots/homework2_split_options.png)
+
+🔍 **Logic:**  
+Flexible splits help better simulate real-world data partitions and evaluation.
+
+---
+
+### 8. **k-Fold Cross-Validation with Metrics**
+- User-selectable k (e.g., k=5).
+- Metrics calculated:
+  - Accuracy
+  - Mean Squared Error (MSE)
+  - Root Mean Squared Error (RMSE)
+
+🖼️ **Screenshots:**  
+- ![k-Fold Setup](screenshots/homework2_kfold_setup1.png)
+- ![k-Fold Setup](screenshots/homework2_kfold_setup2.png)
+- ![k-Fold Results](screenshots/homework2_kfold_results.png)
+
+---
+
+### 📊 Cross-Validation Results (k=5)
+
+| Fold | Accuracy (%) | MSE  | RMSE |
+|------|--------------|------|------|
+| 1    | 92           | 0.08 | 0.28 |
+| 2    | 90           | 0.10 | 0.32 |
+| 3    | 93           | 0.07 | 0.26 |
+| 4    | 91           | 0.09 | 0.30 |
+| 5    | 92           | 0.08 | 0.28 |
+
+✅ **Mean Accuracy:** 91.6%  
+✅ **Standard Deviation (Accuracy):** 1.14%  
+✅ **Mean MSE:** 0.084  
+✅ **Standard Deviation (MSE):** 0.011
+
+🔍 **Interpretation:**  
+Low standard deviation indicates stable and reliable model performance across folds.
+
+---
+
+### 9. **Interactive Visualizations**
+- All plots created for full interactivity!
+- Zoom, rotate, hover, and explore your datasets dynamically.
+
+🎬 **Interactive Visualization Video:**  
+![3D Plot](screenshots/homework2_video_3d.mp4)
+
+---
+
+## 🛠️ Requirements Update
+
+Along with previous dependencies, install:
+
+```bash
+pip install plotly umap-learn
