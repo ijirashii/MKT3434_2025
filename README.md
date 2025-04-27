@@ -281,7 +281,7 @@ Low standard deviation indicates stable and reliable model performance across fo
 - Zoom, rotate, hover, and explore your datasets dynamically.
 
 🎬 **Interactive Visualization Video:**  
-![3D Plot](screenshots/homework2_video_3d.mp4)
+![3D Plot](screenshots/homework2_video_3d.gif)
 
 ---
 
