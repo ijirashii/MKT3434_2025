@@ -111,7 +111,8 @@ You can install all dependencies by running:
 pip install -r requirements.txt
 
 
-#####################################################################################################
+---
+
 
 # Machine Learning GUI - MKT3434 Homework-2 🚀
 
