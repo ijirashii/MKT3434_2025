@@ -109,7 +109,7 @@ You can install all dependencies by running:
 
 ```bash
 pip install -r requirements.txt
-
+```
 
 ---
 
