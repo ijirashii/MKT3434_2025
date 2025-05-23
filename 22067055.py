@@ -6,7 +6,8 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QComboBox, QFileDialog, QSpinBox, QDoubleSpinBox,
                              QGroupBox, QScrollArea, QTextEdit, QStatusBar,
                              QProgressBar, QCheckBox, QGridLayout, QMessageBox,
-                             QDialog, QLineEdit)
+                             QDialog, QLineEdit, QTableWidgetItem, QListWidget,
+                             QTableWidget)
 from PyQt6.QtCore import Qt
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
@@ -29,6 +30,8 @@ import tensorflow as tf
 from tensorflow.keras import layers, models, optimizers
 from mpl_toolkits.mplot3d import Axes3D
 import umap  # Add UMAP import
+import json
+import datetime
 
 
 class MLCourseGUI(QMainWindow):
@@ -37,10 +40,16 @@ class MLCourseGUI(QMainWindow):
         self.setWindowTitle("Machine Learning Course GUI")
         self.setGeometry(100, 100, 1400, 800)
 
-        # Initialize main widget and layout
+        # Create a scroll area to be the central widget
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True) # Important for layout to expand correctly
+        self.setCentralWidget(self.scroll_area)
+
+        # Initialize main widget and layout (this will go *inside* the scroll area)
         self.main_widget = QWidget()
-        self.setCentralWidget(self.main_widget)
-        self.layout = QVBoxLayout(self.main_widget)
+        # self.setCentralWidget(self.main_widget) # No longer set main_widget directly
+        self.layout = QVBoxLayout(self.main_widget) # layout is for main_widget
+        self.scroll_area.setWidget(self.main_widget) # Put main_widget inside scroll_area
 
         # Initialize data containers
         self.X_train = None
@@ -51,6 +60,7 @@ class MLCourseGUI(QMainWindow):
 
         # Neural network configuration
         self.layer_config = []
+        self.base_model = None # For pre-trained models
 
         # Create components
         self.create_data_section()
@@ -164,8 +174,70 @@ class MLCourseGUI(QMainWindow):
         scaling_group.setLayout(scaling_layout)
         data_layout.addWidget(scaling_group)
 
+        # Image Augmentation Section (within Preprocessing)
+        self.augmentation_group = QGroupBox("Image Augmentation (for image datasets)")
+        aug_layout = QGridLayout()
+
+        self.enable_augmentation_checkbox = QCheckBox("Enable Image Augmentation")
+        self.enable_augmentation_checkbox.stateChanged.connect(self.toggle_augmentation_controls)
+        aug_layout.addWidget(self.enable_augmentation_checkbox, 0, 0, 1, 2)
+
+        # Rotation
+        self.aug_rotate_checkbox = QCheckBox("Rotation")
+        aug_layout.addWidget(self.aug_rotate_checkbox, 1, 0)
+        self.aug_rotate_angle_spinbox = QDoubleSpinBox()
+        self.aug_rotate_angle_spinbox.setRange(0, 45.0) # Max rotation angle in degrees
+        self.aug_rotate_angle_spinbox.setValue(10.0)
+        self.aug_rotate_angle_spinbox.setSuffix(" °")
+        aug_layout.addWidget(self.aug_rotate_angle_spinbox, 1, 1)
+
+        # Horizontal Flip
+        self.aug_hflip_checkbox = QCheckBox("Horizontal Flip")
+        aug_layout.addWidget(self.aug_hflip_checkbox, 2, 0)
+
+        # Vertical Flip
+        self.aug_vflip_checkbox = QCheckBox("Vertical Flip")
+        aug_layout.addWidget(self.aug_vflip_checkbox, 2, 1)
+        
+        # Scaling/Zoom
+        self.aug_scale_checkbox = QCheckBox("Scaling (Zoom)")
+        aug_layout.addWidget(self.aug_scale_checkbox, 3, 0)
+        self.aug_scale_factor_spinbox = QDoubleSpinBox()
+        self.aug_scale_factor_spinbox.setRange(0.0, 0.5)  # Max zoom factor (e.g., 0.2 for +/- 20%)
+        self.aug_scale_factor_spinbox.setValue(0.1)
+        self.aug_scale_factor_spinbox.setToolTip("Zoom range, e.g., 0.1 means zoom between 0.9 and 1.1")
+        aug_layout.addWidget(self.aug_scale_factor_spinbox, 3, 1)
+
+        self.augmentation_group.setLayout(aug_layout)
+        data_layout.addWidget(self.augmentation_group)
+        
+        # Initially disable augmentation controls
+        self.toggle_augmentation_controls(Qt.CheckState.Unchecked.value)
+
         data_group.setLayout(data_layout)
         self.layout.addWidget(data_group)
+
+    def toggle_augmentation_controls(self, state):
+        """Enable or disable augmentation parameter controls based on the main checkbox."""
+        enabled = (state == Qt.CheckState.Checked.value)
+        self.aug_rotate_checkbox.setEnabled(enabled)
+        self.aug_rotate_angle_spinbox.setEnabled(enabled)
+        self.aug_hflip_checkbox.setEnabled(enabled)
+        self.aug_vflip_checkbox.setEnabled(enabled)
+        self.aug_scale_checkbox.setEnabled(enabled)
+        self.aug_scale_factor_spinbox.setEnabled(enabled)
+        
+        # Also consider if an image dataset is loaded
+        is_image_data = self.dataset_combo.currentText() == "MNIST Dataset" # Add other image types later
+        self.augmentation_group.setEnabled(is_image_data)
+        if not is_image_data: # If not image data, all sub-controls should be off
+            self.enable_augmentation_checkbox.setChecked(False)
+            self.aug_rotate_checkbox.setEnabled(False)
+            self.aug_rotate_angle_spinbox.setEnabled(False)
+            self.aug_hflip_checkbox.setEnabled(False)
+            self.aug_vflip_checkbox.setEnabled(False)
+            self.aug_scale_checkbox.setEnabled(False)
+            self.aug_scale_factor_spinbox.setEnabled(False)
 
     def update_splits(self):
         """Update split values to ensure they sum to 1.0"""
@@ -200,9 +272,81 @@ class MLCourseGUI(QMainWindow):
             # Apply missing value handling if selected
             self.handle_missing_values()
 
+            # Apply image augmentation if enabled and applicable
+            if self.enable_augmentation_checkbox.isChecked() and self.dataset_combo.currentText() == "MNIST Dataset":
+                self.apply_image_augmentation()
+
             self.status_bar.showMessage("Preprocessing applied successfully")
         except Exception as e:
             self.show_error(f"Error in preprocessing: {str(e)}")
+
+    def apply_image_augmentation(self):
+        """Apply selected image augmentations to self.X_train"""
+        if self.X_train is None:
+            self.show_error("Cannot apply augmentation: X_train is not loaded.")
+            return
+
+        # Ensure X_train is in a format suitable for tf.image (e.g., NHWC for MNIST)
+        # MNIST is typically (num_samples, 28, 28). Reshape to (num_samples, 28, 28, 1).
+        if len(self.X_train.shape) == 3: # Assuming (N, H, W)
+            X_augmented = np.expand_dims(self.X_train, axis=-1).astype(np.float32)
+        elif len(self.X_train.shape) == 4 and self.X_train.shape[-1] == 1: # Already (N,H,W,C)
+            X_augmented = self.X_train.astype(np.float32)
+        else:
+            self.show_error(f"Unsupported image data shape for augmentation: {self.X_train.shape}")
+            return
+        
+        # Create a sequence of Keras preprocessing layers
+        augmentation_layers = []
+
+        if self.aug_rotate_checkbox.isChecked():
+            # Keras RandomRotation: if factor is a float, range is [-factor*2*pi, factor*2*pi].
+            # If our spinbox is in degrees, we want rotation in [-angle_degrees, +angle_degrees].
+            # So, factor * 2 * pi = angle_degrees * pi / 180 (converting degrees to radians)
+            # factor = (angle_degrees / 180) / 2 = angle_degrees / 360
+            angle_degrees = self.aug_rotate_angle_spinbox.value()
+            rotation_factor = angle_degrees / 360.0
+            augmentation_layers.append(layers.RandomRotation(factor=rotation_factor))
+
+        if self.aug_hflip_checkbox.isChecked():
+            augmentation_layers.append(layers.RandomFlip(mode="horizontal"))
+
+        if self.aug_vflip_checkbox.isChecked():
+            augmentation_layers.append(layers.RandomFlip(mode="vertical"))
+
+        if self.aug_scale_checkbox.isChecked():
+            zoom_factor = self.aug_scale_factor_spinbox.value()
+            # RandomZoom takes a tuple for (min_zoom, max_zoom) relative to 1.0
+            # Or a single float for (-factor, factor) meaning zoom in (factor) or zoom out (-factor)
+            # Height_factor = (-zoom_factor, zoom_factor), width_factor = (-zoom_factor, zoom_factor)
+            augmentation_layers.append(layers.RandomZoom(height_factor=zoom_factor, width_factor=zoom_factor))
+
+        if not augmentation_layers:
+            self.status_bar.showMessage("Image augmentation enabled, but no specific augmentations selected.")
+            return
+
+        # Build a sequential model for augmentation
+        augmentation_model = tf.keras.Sequential(augmentation_layers)
+
+        # Apply augmentations. 
+        # This will augment the entire training dataset once. 
+        # For on-the-fly augmentation during training, this should be part of the tf.data.Dataset pipeline.
+        # For now, we augment it here as a preprocessing step.
+        augmented_images = []
+        # Process in batches to avoid memory issues if X_train is very large
+        batch_size = 128 
+        for i in range(0, X_augmented.shape[0], batch_size):
+            batch = X_augmented[i:i+batch_size]
+            augmented_batch = augmentation_model(batch, training=True) # training=True to activate layers
+            augmented_images.append(augmented_batch.numpy())
+        
+        self.X_train = np.concatenate(augmented_images, axis=0)
+        
+        # If original was (N,H,W), squeeze back. Otherwise keep (N,H,W,C)
+        if len(self.X_train.shape) == 4 and self.X_train.shape[-1] == 1 and len(self.X_train.shape) == 3:
+             self.X_train = np.squeeze(self.X_train, axis=-1)
+
+        self.status_bar.showMessage("Image augmentation applied to training data.")
 
     def load_dataset(self):
         """Load selected dataset"""
@@ -236,6 +380,7 @@ class MLCourseGUI(QMainWindow):
                 self.X_train, self.X_val, self.X_test = X_train, X_val, X_test
                 self.y_train, self.y_val, self.y_test = y_train, y_val, y_test
                 self.status_bar.showMessage(f"Loaded {dataset_name}")
+                self.toggle_augmentation_controls(self.enable_augmentation_checkbox.checkState().value) # Update UI
                 return
 
             # Get split ratios
@@ -266,6 +411,7 @@ class MLCourseGUI(QMainWindow):
 
             self.status_bar.showMessage(
                 f"Loaded {dataset_name} with splits: {train_size: .1%}/{val_size: .1%}/{test_size: .1%}")
+            self.toggle_augmentation_controls(self.enable_augmentation_checkbox.checkState().value) # Update UI
 
         except Exception as e:
             self.show_error(f"Error loading dataset: {str(e)}")
@@ -317,6 +463,7 @@ class MLCourseGUI(QMainWindow):
                             val_size: .1%}/{
                             test_size: .1%}"
                     )
+                    self.toggle_augmentation_controls(self.enable_augmentation_checkbox.checkState().value) # Update UI
 
         except Exception as e:
             self.show_error(f"Error loading custom dataset: {str(e)}")
@@ -409,6 +556,18 @@ class MLCourseGUI(QMainWindow):
     def create_tabs(self):
         """Create tabs for different ML topics"""
         self.tab_widget = QTabWidget()
+        
+        # Set tab widget properties for larger tabs
+        # self.tab_widget.setStyleSheet("""
+        #     QTabWidget::pane {
+        #         border: 1px solid #cccccc;
+        #         background: white;
+        #     }
+        # """)
+        
+        # Set minimum size for the tab widget
+        self.tab_widget.setMinimumHeight(250)
+        #self.tab_widget.setMinimumWidth(800)
 
         # Create individual tabs
         tabs = [
@@ -416,7 +575,8 @@ class MLCourseGUI(QMainWindow):
             ("Deep Learning", self.create_deep_learning_tab),
             ("Dimensionality Reduction", self.create_dim_reduction_tab),
             ("Cross Validation", self.create_cross_validation_tab),
-            ("Reinforcement Learning", self.create_rl_tab)
+            ("Reinforcement Learning", self.create_rl_tab),
+            ("Training Visualization", self.create_training_visualization_tab)
         ]
 
         for tab_name, create_func in tabs:
@@ -427,6 +587,84 @@ class MLCourseGUI(QMainWindow):
             self.tab_widget.addTab(scroll, tab_name)
 
         self.layout.addWidget(self.tab_widget)
+
+    def create_model_design_tab(self):
+        """Create the model design tab for configuring neural network architectures"""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        # Model Architecture Section
+        arch_group = QGroupBox("Model Architecture")
+        arch_layout = QVBoxLayout()
+
+        # Layer list with scroll area
+        layer_list_group = QGroupBox("Layer Configuration")
+        layer_list_layout = QVBoxLayout()
+        
+        # Create scroll area for layer list
+        layer_scroll = QScrollArea()
+        layer_scroll.setWidgetResizable(True)
+        layer_scroll.setMinimumHeight(200)  # Set minimum height for layer configuration
+        self.layer_list_widget = QWidget()
+        self.layer_list_layout = QVBoxLayout(self.layer_list_widget)
+        layer_scroll.setWidget(self.layer_list_widget)
+        layer_list_layout.addWidget(layer_scroll)
+
+        # Layer controls
+        layer_controls = QHBoxLayout()
+        
+        # Add layer button
+        add_layer_btn = QPushButton("Add Layer")
+        add_layer_btn.clicked.connect(self.add_layer_dialog)
+        layer_controls.addWidget(add_layer_btn)
+        
+        # Remove layer button
+        remove_layer_btn = QPushButton("Remove Selected Layer")
+        remove_layer_btn.clicked.connect(self.remove_selected_layer)
+        layer_controls.addWidget(remove_layer_btn)
+        
+        # Move layer up/down buttons
+        move_up_btn = QPushButton("Move Up")
+        move_up_btn.clicked.connect(lambda: self.move_layer(-1))
+        layer_controls.addWidget(move_up_btn)
+        
+        move_down_btn = QPushButton("Move Down")
+        move_down_btn.clicked.connect(lambda: self.move_layer(1))
+        layer_controls.addWidget(move_down_btn)
+        
+        layer_list_layout.addLayout(layer_controls)
+        layer_list_group.setLayout(layer_list_layout)
+        arch_layout.addWidget(layer_list_group)
+
+        # Model summary section
+        summary_group = QGroupBox("Model Summary")
+        summary_layout = QVBoxLayout()
+        self.model_summary_text = QTextEdit()
+        self.model_summary_text.setReadOnly(True)
+        self.model_summary_text.setMinimumHeight(300)  # Set minimum height for model summary
+        summary_layout.addWidget(self.model_summary_text)
+        summary_group.setLayout(summary_layout)
+        arch_layout.addWidget(summary_group)
+
+        arch_group.setLayout(arch_layout)
+        layout.addWidget(arch_group)
+
+        # Model save/load section
+        save_load_group = QGroupBox("Save/Load Model")
+        save_load_layout = QHBoxLayout()
+        
+        save_btn = QPushButton("Save Model")
+        save_btn.clicked.connect(self.save_model_architecture)
+        save_load_layout.addWidget(save_btn)
+        
+        load_btn = QPushButton("Load Model")
+        load_btn.clicked.connect(self.load_model_architecture)
+        save_load_layout.addWidget(load_btn)
+        
+        save_load_group.setLayout(save_load_layout)
+        layout.addWidget(save_load_group)
+
+        return widget
 
     def create_classical_ml_tab(self):
         """Create the classical machine learning algorithms tab"""
@@ -905,26 +1143,48 @@ class MLCourseGUI(QMainWindow):
         viz_group = QGroupBox("Visualization")
         viz_layout = QHBoxLayout()
 
+        # Left side: Plotting area
+        plot_area_widget = QWidget()
+        plot_area_layout = QVBoxLayout(plot_area_widget)
+
         # Create matplotlib figure with navigation toolbar
-        self.figure = Figure(figsize=(8, 6))
+        self.figure = Figure(figsize=(8, 6)) # Adjusted figure size for potentially less width
         self.canvas = FigureCanvas(self.figure)
 
         # Add navigation toolbar
         from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
         self.toolbar = NavigationToolbar(self.canvas, self)
 
-        # Create a widget to hold the canvas and toolbar
-        plot_widget = QWidget()
-        plot_layout = QVBoxLayout(plot_widget)
-        plot_layout.addWidget(self.toolbar)
-        plot_layout.addWidget(self.canvas)
+        plot_area_layout.addWidget(self.toolbar)
+        plot_area_layout.addWidget(self.canvas)
+        
+        viz_layout.addWidget(plot_area_widget, 2) # Give more space to plot
 
-        viz_layout.addWidget(plot_widget)
+        # Right side: Text details (Epoch info and Final Metrics)
+        text_details_widget = QWidget()
+        text_details_layout = QVBoxLayout(text_details_widget)
 
-        # Metrics display
+        # Epoch details display
+        epoch_details_group = QGroupBox("Epoch Details (During Training)")
+        epoch_details_layout = QVBoxLayout()
+        self.epoch_details_text = QTextEdit()
+        self.epoch_details_text.setReadOnly(True)
+        self.epoch_details_text.setMinimumHeight(150) # Initial height
+        epoch_details_layout.addWidget(self.epoch_details_text)
+        epoch_details_group.setLayout(epoch_details_layout)
+        text_details_layout.addWidget(epoch_details_group)
+
+        # Final Metrics display
+        final_metrics_group = QGroupBox("Final Model Metrics")
+        final_metrics_layout = QVBoxLayout()
         self.metrics_text = QTextEdit()
         self.metrics_text.setReadOnly(True)
-        viz_layout.addWidget(self.metrics_text)
+        self.metrics_text.setMinimumHeight(150) # Initial height
+        final_metrics_layout.addWidget(self.metrics_text)
+        final_metrics_group.setLayout(final_metrics_layout)
+        text_details_layout.addWidget(final_metrics_group)
+        
+        viz_layout.addWidget(text_details_widget, 1) # Give less space to text initially
 
         viz_group.setLayout(viz_layout)
         self.layout.addWidget(viz_group)
@@ -981,252 +1241,220 @@ class MLCourseGUI(QMainWindow):
 
     def create_deep_learning_tab(self):
         """Create the deep learning tab"""
-        widget = QWidget()
-        layout = QGridLayout(widget)
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
 
-        # MLP section
-        mlp_group = QGroupBox("Multi-Layer Perceptron")
-        mlp_layout = QVBoxLayout()
+        # Model architecture section
+        model_group = QGroupBox("Model Architecture")
+        model_layout = QVBoxLayout()
 
-        # Layer configuration
-        self.layer_config = []
-        layer_btn = QPushButton("Add Layer")
-        layer_btn.clicked.connect(self.add_layer_dialog)
-        mlp_layout.addWidget(layer_btn)
+        # Layer list with scroll area
+        layer_list_group = QGroupBox("Layer Configuration")
+        layer_list_layout = QVBoxLayout()
+        
+        # Create scroll area for layer list
+        layer_scroll = QScrollArea()
+        layer_scroll.setWidgetResizable(True)
+        self.layer_list_widget = QWidget()
+        self.layer_list_layout = QVBoxLayout(self.layer_list_widget)
+        layer_scroll.setWidget(self.layer_list_widget)
+        layer_list_layout.addWidget(layer_scroll)
 
-        # Training parameters
-        training_params_group = self.create_training_params_group()
-        mlp_layout.addWidget(training_params_group)
+        # Layer controls
+        layer_controls = QHBoxLayout()
+        
+        # Add layer button
+        add_layer_btn = QPushButton("Add Layer")
+        add_layer_btn.clicked.connect(self.add_layer_dialog)
+        layer_controls.addWidget(add_layer_btn)
+        
+        # Remove layer button
+        remove_layer_btn = QPushButton("Remove Selected Layer")
+        remove_layer_btn.clicked.connect(self.remove_selected_layer)
+        layer_controls.addWidget(remove_layer_btn)
+        
+        # Move layer up/down buttons
+        move_up_btn = QPushButton("Move Up")
+        move_up_btn.clicked.connect(lambda: self.move_layer(-1))
+        layer_controls.addWidget(move_up_btn)
+        
+        move_down_btn = QPushButton("Move Down")
+        move_down_btn.clicked.connect(lambda: self.move_layer(1))
+        layer_controls.addWidget(move_down_btn)
+        
+        layer_list_layout.addLayout(layer_controls)
+        layer_list_group.setLayout(layer_list_layout)
+        model_layout.addWidget(layer_list_group)
 
-        # Train button
-        train_btn = QPushButton("Train Neural Network")
-        train_btn.clicked.connect(self.train_neural_network)
-        mlp_layout.addWidget(train_btn)
+        # Model summary section
+        summary_group = QGroupBox("Model Summary")
+        summary_layout = QVBoxLayout()
+        self.model_summary_text = QTextEdit()
+        self.model_summary_text.setReadOnly(True)
+        summary_layout.addWidget(self.model_summary_text)
+        summary_group.setLayout(summary_layout)
+        model_layout.addWidget(summary_group)
 
-        mlp_group.setLayout(mlp_layout)
-        layout.addWidget(mlp_group, 0, 0)
+        model_group.setLayout(model_layout)
+        layout.addWidget(model_group)
 
-        # CNN section
-        cnn_group = QGroupBox("Convolutional Neural Network")
-        cnn_layout = QVBoxLayout()
+        # Quick MNIST Configuration
+        mnist_group = QGroupBox("Quick MNIST Configuration")
+        mnist_layout = QVBoxLayout()
+        
+        # Add a button to load the compute-efficient MNIST configuration
+        load_mnist_config_btn = QPushButton("Load Compute-Efficient MNIST Config")
+        load_mnist_config_btn.clicked.connect(self.load_efficient_mnist_config)
+        mnist_layout.addWidget(load_mnist_config_btn)
+        
+        mnist_group.setLayout(mnist_layout)
+        layout.addWidget(mnist_group)
 
-        # CNN architecture controls
-        cnn_controls = self.create_cnn_controls()
-        cnn_layout.addWidget(cnn_controls)
+        # Training configuration section
+        training_group = QGroupBox("Training")
+        training_layout = QVBoxLayout()
 
-        cnn_group.setLayout(cnn_layout)
-        layout.addWidget(cnn_group, 0, 1)
+        # Training configuration button
+        config_btn = QPushButton("Configure Training")
+        config_btn.clicked.connect(self.configure_training)
+        training_layout.addWidget(config_btn)
 
-        # RNN section
-        rnn_group = QGroupBox("Recurrent Neural Network")
-        rnn_layout = QVBoxLayout()
+        # Training status
+        status_layout = QHBoxLayout()
+        self.training_status = QLabel("Not trained")
+        self.training_progress = QProgressBar()
+        self.training_progress.setRange(0, 100)
+        self.training_progress.setValue(0)
+        status_layout.addWidget(self.training_status)
+        status_layout.addWidget(self.training_progress)
+        training_layout.addLayout(status_layout)
 
-        # RNN architecture controls
-        rnn_controls = self.create_rnn_controls()
-        rnn_layout.addWidget(rnn_controls)
+        # Training buttons
+        train_btn_layout = QHBoxLayout()
+        train_btn = QPushButton("Train Model")
+        stop_btn = QPushButton("Stop Training")
+        train_btn.clicked.connect(self.train_neural_network)  # Changed to train_neural_network
+        stop_btn.clicked.connect(self.stop_training)
+        train_btn_layout.addWidget(train_btn)
+        train_btn_layout.addWidget(stop_btn)
+        training_layout.addLayout(train_btn_layout)
 
-        rnn_group.setLayout(rnn_layout)
-        layout.addWidget(rnn_group, 1, 0)
+        training_group.setLayout(training_layout)
+        layout.addWidget(training_group)
 
-        return widget
+        # Model save/load section
+        save_load_group = QGroupBox("Save/Load Model")
+        save_load_layout = QHBoxLayout()
 
-    def add_layer_dialog(self):
-        """Open a dialog to add a neural network layer"""
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Add Neural Network Layer")
-        layout = QVBoxLayout(dialog)
+        save_btn = QPushButton("Save Model")
+        load_btn = QPushButton("Load Model")
+        save_btn.clicked.connect(self.save_model_architecture)
+        load_btn.clicked.connect(self.load_model_architecture)
+        save_load_layout.addWidget(save_btn)
+        save_load_layout.addWidget(load_btn)
 
-        # Layer type selection
-        type_layout = QHBoxLayout()
-        type_label = QLabel("Layer Type:")
-        type_combo = QComboBox()
-        type_combo.addItems(
-            ["Dense", "Conv2D", "MaxPooling2D", "Flatten", "Dropout"])
-        type_layout.addWidget(type_label)
-        type_layout.addWidget(type_combo)
-        layout.addLayout(type_layout)
+        save_load_group.setLayout(save_load_layout)
+        layout.addWidget(save_load_group)
 
-        # Parameters input
-        params_group = QGroupBox("Layer Parameters")
-        params_layout = QVBoxLayout()
+        # Pre-trained Model Fine-tuning Section
+        pretrained_group = QGroupBox("Pre-trained Model Fine-tuning")
+        pretrained_layout = QVBoxLayout()
 
-        # Dynamic parameter inputs based on layer type
-        self.layer_param_inputs = {}
+        self.pretrained_model_combo = QComboBox()
+        self.pretrained_model_combo.addItems(["None", "VGG16", "ResNet50", "MobileNetV2", "EfficientNetB0"])
+        pretrained_layout.addWidget(QLabel("Select Pre-trained Model:"))
+        pretrained_layout.addWidget(self.pretrained_model_combo)
 
-        def update_params():
-            # Clear existing parameter inputs
-            for widget in list(self.layer_param_inputs.values()):
-                params_layout.removeWidget(widget)
-                widget.deleteLater()
-            self.layer_param_inputs.clear()
+        self.freeze_layers_checkbox = QCheckBox("Freeze Base Model Layers")
+        self.freeze_layers_checkbox.setChecked(True) # Usually good to start with frozen layers
+        pretrained_layout.addWidget(self.freeze_layers_checkbox)
+        
+        # Add a field for number of output classes for the head
+        self.num_classes_spinbox = QSpinBox()
+        self.num_classes_spinbox.setRange(1, 2000) # Max classes
+        self.num_classes_spinbox.setValue(10) # Default for MNIST/CIFAR10
+        self.num_classes_spinbox.setToolTip("Number of output classes for the new classification head.")
+        num_classes_layout = QHBoxLayout()
+        num_classes_layout.addWidget(QLabel("Number of Classes (for head):"))
+        num_classes_layout.addWidget(self.num_classes_spinbox)
+        pretrained_layout.addLayout(num_classes_layout)
 
-            layer_type = type_combo.currentText()
-            if layer_type == "Dense":
-                units_label = QLabel("Units:")
-                units_input = QSpinBox()
-                units_input.setRange(1, 1000)
-                units_input.setValue(32)
-                self.layer_param_inputs["units"] = units_input
+        load_pretrained_btn = QPushButton("Load Model & Build Head")
+        load_pretrained_btn.clicked.connect(self.load_and_configure_pretrained_model)
+        pretrained_layout.addWidget(load_pretrained_btn)
 
-                activation_label = QLabel("Activation:")
-                activation_combo = QComboBox()
-                activation_combo.addItems(
-                    ["relu", "sigmoid", "tanh", "softmax"])
-                self.layer_param_inputs["activation"] = activation_combo
+        pretrained_group.setLayout(pretrained_layout)
+        layout.addWidget(pretrained_group)
 
-                params_layout.addWidget(units_label)
-                params_layout.addWidget(units_input)
-                params_layout.addWidget(activation_label)
-                params_layout.addWidget(activation_combo)
+        return tab
 
-            elif layer_type == "Conv2D":
-                filters_label = QLabel("Filters:")
-                filters_input = QSpinBox()
-                filters_input.setRange(1, 1000)
-                filters_input.setValue(32)
-                self.layer_param_inputs["filters"] = filters_input
+    def load_and_configure_pretrained_model(self):
+        """Loads a pre-trained model and sets up a classification head."""
+        selected_model_name = self.pretrained_model_combo.currentText()
+        if selected_model_name == "None":
+            self.base_model = None
+            self.layer_config = [] # Clear existing layers if switching back to no pre-trained model
+            self.update_layer_list()
+            self.status_bar.showMessage("Pre-trained model cleared. Build a custom model or select one.")
+            return
 
-                kernel_label = QLabel("Kernel Size:")
-                kernel_input = QLineEdit()
-                kernel_input.setText("3, 3")
-                self.layer_param_inputs["kernel_size"] = kernel_input
+        try:
+            freeze_base = self.freeze_layers_checkbox.isChecked()
+            num_classes = self.num_classes_spinbox.value()
+            
+            # Define standard input shape for many pre-trained models
+            # This might need to be configurable or dynamically determined later
+            input_shape = (224, 224, 3) 
 
-                params_layout.addWidget(filters_label)
-                params_layout.addWidget(filters_input)
-                params_layout.addWidget(kernel_label)
-                params_layout.addWidget(kernel_input)
+            if selected_model_name == "VGG16":
+                self.base_model = tf.keras.applications.VGG16(
+                    include_top=False, weights='imagenet', input_shape=input_shape
+                )
+            elif selected_model_name == "ResNet50":
+                self.base_model = tf.keras.applications.ResNet50(
+                    include_top=False, weights='imagenet', input_shape=input_shape
+                )
+            elif selected_model_name == "MobileNetV2":
+                self.base_model = tf.keras.applications.MobileNetV2(
+                    include_top=False, weights='imagenet', input_shape=input_shape
+                )
+            elif selected_model_name == "EfficientNetB0":
+                self.base_model = tf.keras.applications.EfficientNetB0(
+                    include_top=False, weights='imagenet', input_shape=input_shape
+                )
+            else:
+                self.show_error(f"Pre-trained model {selected_model_name} is not yet supported.")
+                return
 
-            elif layer_type == "Dropout":
-                rate_label = QLabel("Dropout Rate:")
-                rate_input = QDoubleSpinBox()
-                rate_input.setRange(0.0, 1.0)
-                rate_input.setValue(0.5)
-                rate_input.setSingleStep(0.1)
-                self.layer_param_inputs["rate"] = rate_input
+            if freeze_base:
+                self.base_model.trainable = False
+            else:
+                self.base_model.trainable = True # Ensure it's trainable if not frozen
 
-                params_layout.addWidget(rate_label)
-                params_layout.addWidget(rate_input)
+            # Define the new classification head layers
+            self.layer_config = [
+                # Note: Flattening is handled by the base_model if it has a pooling layer at the end,
+                # or we can add GlobalAveragePooling2D for flexibility before Dense layers.
+                # For now, let's assume base_model output needs flattening or GAP.
+                # We will add a GlobalAveragePooling2D as a robust way to connect to Dense head.
+                {"type": "GlobalAveragePooling2D", "params": {}},
+                {"type": "Dense", "params": {"units": 256, "activation": "relu"}},
+                {"type": "Dropout", "params": {"rate": 0.5}},
+                {"type": "Dense", "params": {"units": num_classes, "activation": "softmax"}}
+            ]
 
-        type_combo.currentIndexChanged.connect(update_params)
-        update_params()  # Initial update
+            self.update_layer_list()
+            self.status_bar.showMessage(f"Loaded {selected_model_name} with new head. Base trainable: {not freeze_base}")
 
-        params_group.setLayout(params_layout)
-        layout.addWidget(params_group)
-
-        # Buttons
-        btn_layout = QHBoxLayout()
-        add_btn = QPushButton("Add Layer")
-        cancel_btn = QPushButton("Cancel")
-        btn_layout.addWidget(add_btn)
-        btn_layout.addWidget(cancel_btn)
-        layout.addLayout(btn_layout)
-
-        def add_layer():
-            layer_type = type_combo.currentText()
-
-            # Collect parameters
-            layer_params = {}
-            for param_name, widget in self.layer_param_inputs.items():
-                if isinstance(widget, QSpinBox):
-                    layer_params[param_name] = widget.value()
-                elif isinstance(widget, QDoubleSpinBox):
-                    layer_params[param_name] = widget.value()
-                elif isinstance(widget, QComboBox):
-                    layer_params[param_name] = widget.currentText()
-                elif isinstance(widget, QLineEdit):
-                    # Handle kernel size or other tuple-like inputs
-                    if param_name == "kernel_size":
-                        layer_params[param_name] = tuple(
-                            map(int, widget.text().split(',')))
-
-            self.layer_config.append({
-                "type": layer_type,
-                "params": layer_params
-            })
-
-            dialog.accept()
-
-        add_btn.clicked.connect(add_layer)
-        cancel_btn.clicked.connect(dialog.reject)
-
-        dialog.exec()
-
-    def create_training_params_group(self):
-        """Create group for neural network training parameters"""
-        group = QGroupBox("Training Parameters")
-        layout = QVBoxLayout()
-
-        # Batch size
-        batch_layout = QHBoxLayout()
-        batch_layout.addWidget(QLabel("Batch Size:"))
-        self.batch_size_spin = QSpinBox()
-        self.batch_size_spin.setRange(1, 1000)
-        self.batch_size_spin.setValue(32)
-        batch_layout.addWidget(self.batch_size_spin)
-        layout.addLayout(batch_layout)
-
-        # Epochs
-        epochs_layout = QHBoxLayout()
-        epochs_layout.addWidget(QLabel("Epochs:"))
-        self.epochs_spin = QSpinBox()
-        self.epochs_spin.setRange(1, 1000)
-        self.epochs_spin.setValue(10)
-        epochs_layout.addWidget(self.epochs_spin)
-        layout.addLayout(epochs_layout)
-
-        # Learning rate
-        lr_layout = QHBoxLayout()
-        lr_layout.addWidget(QLabel("Learning Rate:"))
-        self.lr_spin = QDoubleSpinBox()
-        self.lr_spin.setRange(0.0001, 1.0)
-        self.lr_spin.setValue(0.001)
-        self.lr_spin.setSingleStep(0.001)
-        lr_layout.addWidget(self.lr_spin)
-        layout.addLayout(lr_layout)
-
-        # Loss function selection
-        loss_layout = QHBoxLayout()
-        loss_layout.addWidget(QLabel("Loss Function:"))
-        self.loss_combo = QComboBox()
-        self.loss_combo.addItems([
-            "Categorical Cross-Entropy",
-            "Binary Cross-Entropy",
-            "Hinge Loss"
-        ])
-        loss_layout.addWidget(self.loss_combo)
-        layout.addLayout(loss_layout)
-
-        group.setLayout(layout)
-        return group
-
-    def create_cnn_controls(self):
-        """Create controls for Convolutional Neural Network"""
-        group = QGroupBox("CNN Architecture")
-        layout = QVBoxLayout()
-
-        # Placeholder for CNN-specific controls
-        label = QLabel("CNN Controls (To be implemented)")
-        layout.addWidget(label)
-
-        group.setLayout(layout)
-        return group
-
-    def create_rnn_controls(self):
-        """Create controls for Recurrent Neural Network"""
-        group = QGroupBox("RNN Architecture")
-        layout = QVBoxLayout()
-
-        # Placeholder for RNN-specific controls
-        label = QLabel("RNN Controls (To be implemented)")
-        layout.addWidget(label)
-
-        group.setLayout(layout)
-        return group
+        except Exception as e:
+            self.base_model = None # Reset on error
+            self.show_error(f"Error loading pre-trained model {selected_model_name}: {str(e)}")
+            self.status_bar.showMessage(f"Failed to load {selected_model_name}.")
 
     def train_neural_network(self):
         """Train the neural network with current configuration"""
-        if not self.layer_config:
-            self.show_error("Please add at least one layer to the network")
+        if not self.layer_config and not self.base_model:
+            self.show_error("Please add at least one layer to the network or select a pre-trained model.")
             return
 
         try:
@@ -1234,106 +1462,266 @@ class MLCourseGUI(QMainWindow):
             model = self.create_neural_network()
 
             # Get training parameters
-            batch_size = self.batch_size_spin.value()
-            epochs = self.epochs_spin.value()
-            learning_rate = self.lr_spin.value()
-            loss_function = self.loss_combo.currentText()
+            if not hasattr(self, 'training_config'):
+                self.training_config = {
+                    "batch_size": 64,
+                    "epochs": 5,
+                    "validation_split": 0.2,
+                    "early_stopping": {
+                        "enable": True,
+                        "patience": 3,
+                        "min_delta": 0.001
+                    }
+                }
 
-            # Prepare data for neural network
-            if len(self.X_train.shape) == 1:
-                X_train = self.X_train.reshape(-1, 1)
-                X_test = self.X_test.reshape(-1, 1)
+            # Update UI before starting
+            self.training_status.setText("Preparing data and model...")
+            self.training_progress.setValue(0)
+            QApplication.processEvents() # Ensure UI updates
+
+            # --- Data Preprocessing for Pre-trained Models (if applicable) ---
+            X_train_processed = self.X_train
+            X_test_processed = self.X_test # Assuming X_val will be handled by validation_split
+            
+            preprocessor = None
+            target_size = None
+
+            if self.base_model: # If a pre-trained model is selected
+                selected_model_name = self.pretrained_model_combo.currentText()
+                # Get the expected input shape from the base model
+                # base_model.input_shape is a tuple like (None, H, W, C)
+                # We need H and W, which are typically input_shape[1] and input_shape[2]
+                if len(self.base_model.input_shape) == 4:
+                    target_size = (self.base_model.input_shape[1], self.base_model.input_shape[2])
+                else: # Fallback if shape is unexpected, though Keras models are standard
+                    target_size = (224, 224) 
+                    self.status_bar.showMessage(f"Warning: Could not determine target size from base model, defaulting to {target_size}")
+
+                if selected_model_name == "VGG16":
+                    preprocessor = tf.keras.applications.vgg16.preprocess_input
+                elif selected_model_name == "ResNet50":
+                    preprocessor = tf.keras.applications.resnet.preprocess_input # or resnet50 for older TF
+                elif selected_model_name == "MobileNetV2":
+                    preprocessor = tf.keras.applications.mobilenet_v2.preprocess_input
+                elif selected_model_name == "EfficientNetB0":
+                    preprocessor = tf.keras.applications.efficientnet.preprocess_input
+                # Add other models here
+
+                if self.X_train is None:
+                    self.show_error("Please load a dataset first for fine-tuning.")
+                    return
+
+                # 1. Resize images
+                # 2. Ensure 3 channels (e.g., for MNIST)
+                # 3. Apply model-specific preprocessing
+                def preprocess_dataset(dataset_x):
+                    # Ensure float32 for tf.image operations
+                    images = tf.image.convert_image_dtype(dataset_x, dtype=tf.float32)
+                    
+                    # Handle grayscale to RGB conversion if original data is (H, W) or (H, W, 1)
+                    if len(images.shape) == 3: # (N, H, W) -> (N, H, W, 1)
+                        images = tf.expand_dims(images, axis=-1)
+                    
+                    if images.shape[-1] == 1: # Grayscale
+                        images = tf.image.grayscale_to_rgb(images)
+                    
+                    # Resize
+                    images = tf.image.resize(images, target_size)
+                    
+                    # Apply model-specific preprocessor if available
+                    if preprocessor:
+                        images = preprocessor(images)
+                    return images.numpy() # Convert back to numpy for model.fit
+                
+                self.training_status.setText("Preprocessing data for fine-tuning...")
+                QApplication.processEvents()
+
+                X_train_processed = preprocess_dataset(self.X_train)
+                # Assuming X_test is already split and available. 
+                # If using validation_split in model.fit, Keras handles splitting X_train_processed.
+                # If self.X_val exists, it should also be preprocessed.
+                if self.X_val is not None:
+                    X_val_processed = preprocess_dataset(self.X_val)
+                else:
+                    X_val_processed = None # Will be handled by validation_split from X_train_processed
+                
+                X_test_processed = preprocess_dataset(self.X_test)
+
+            else: # No base model, use data as is (after regular augmentation/preprocessing)
+                X_train_processed = self.X_train
+                X_val_processed = self.X_val # Could be None
+                X_test_processed = self.X_test
+            
+            # --- End Data Preprocessing for Pre-trained Models ---
+
+            # Prepare data for neural network (Original part of your function)
+            if X_train_processed is None:
+                self.show_error("Please load and preprocess a dataset first")
+                return
+
+            # Reshape data if needed (e.g. for a custom CNN expecting specific input)
+            # This part might need adjustment if base_model is used, as preprocessing above handles shape.
+            if not self.base_model and len(X_train_processed.shape) == 3:  # MNIST data for custom CNN
+                X_train_final = X_train_processed.reshape(-1, 28, 28, 1)
+                X_test_final = X_test_processed.reshape(-1, 28, 28, 1)
+                X_val_final = X_val_processed.reshape(-1, 28, 28, 1) if X_val_processed is not None else None
             else:
-                X_train = self.X_train
-                X_test = self.X_test
+                X_train_final = X_train_processed
+                X_test_final = X_test_processed
+                X_val_final = X_val_processed
 
             # Get number of classes
+            # Ensure y_train is not None before trying to get unique values
+            if self.y_train is None:
+                self.show_error("Target variable y_train is not loaded.")
+                return
             num_classes = len(np.unique(self.y_train))
 
-            # Validate loss function selection based on number of classes
-            if loss_function == "Binary Cross-Entropy" and num_classes > 2:
-                self.show_error(
-                    "Binary Cross-Entropy can only be used for binary classification")
+            # Prepare target data
+            y_train_cat = tf.keras.utils.to_categorical(self.y_train, num_classes=num_classes)
+            y_test_cat = tf.keras.utils.to_categorical(self.y_test, num_classes=num_classes)
+            y_val_cat = tf.keras.utils.to_categorical(self.y_val, num_classes=num_classes) if self.y_val is not None else None
+
+
+            # Create and compile model
+            model = self.create_neural_network()
+            if model is None: # If create_neural_network failed (e.g. base_model invalid)
+                self.training_status.setText("Model creation failed.")
                 return
 
-            elif loss_function in ["Categorical Cross-Entropy", "Hinge Loss"] and num_classes == 2:
-                self.show_error(
-                    "Categorical Cross-Entropy and Hinge Loss are better suited for multi-class classification")
-                return
+            # Create optimizer if not exists
+            if not hasattr(self, 'optimizer'):
+                self.optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
 
-            # Prepare target data based on loss function
-            if loss_function == "Binary Cross-Entropy":
-                y_train = self.y_train.reshape(-1, 1)
-                y_test = self.y_test.reshape(-1, 1)
-            else:  # Categorical Cross-Entropy or Hinge Loss
-                y_train = tf.keras.utils.to_categorical(
-                    self.y_train, num_classes=num_classes)
-                y_test = tf.keras.utils.to_categorical(
-                    self.y_test, num_classes=num_classes)
+            # Compile model
+            model.compile(
+                optimizer=self.optimizer,
+                loss='categorical_crossentropy',
+                metrics=['accuracy']
+            )
+            
+            # Display model summary in the epoch details text area before training starts
+            if hasattr(self, 'epoch_details_text'):
+                self.epoch_details_text.clear()
+                summary_list = []
+                model.summary(print_fn=lambda x: summary_list.append(x))
+                self.epoch_details_text.append("Model Summary:\n" + "\n".join(summary_list) + "\n" + "-"*20 + "\n")
+                QApplication.processEvents()
 
-            # Compile model with selected loss function
-            optimizer = optimizers.Adam(learning_rate=learning_rate)
+            # Create callbacks
+            callbacks = []
+            if self.training_config['early_stopping']['enable']:
+                callbacks.append(tf.keras.callbacks.EarlyStopping(
+                    monitor='val_loss',
+                    patience=self.training_config['early_stopping']['patience'],
+                    min_delta=self.training_config['early_stopping']['min_delta'],
+                    restore_best_weights=True
+                ))
 
-            # Map loss function names to Keras loss functions
-            loss_mapping = {
-                "Categorical Cross-Entropy": 'categorical_crossentropy',
-                "Binary Cross-Entropy": 'binary_crossentropy',
-                "Hinge Loss": 'categorical_hinge'
-            }
+            # Add progress callback
+            callbacks.append(self.create_progress_callback())
 
-            loss = loss_mapping[loss_function]
+            # Clear previous epoch details (already done above if displaying summary)
+            # self.epoch_details_text.clear() 
 
-            # Add appropriate metrics based on loss function
-            metrics = ['accuracy']
-            if loss_function == "Binary Cross-Entropy":
-                metrics.append('AUC')
-
-            model.compile(optimizer=optimizer,
-                          loss=loss,
-                          metrics=metrics)
+            self.training_status.setText(f"Training... Epoch 1/{self.training_config['epochs']}")
+            QApplication.processEvents()
 
             # Train model
-            history = model.fit(X_train, y_train,
-                                batch_size=batch_size,
-                                epochs=epochs,
-                                validation_data=(X_test, y_test),
-                                callbacks=[self.create_progress_callback()])
+            fit_params = {
+                'x': X_train_final,
+                'y': y_train_cat,
+                'batch_size': self.training_config['batch_size'],
+                'epochs': self.training_config['epochs'],
+                'callbacks': callbacks
+            }
+            if X_val_final is not None and y_val_cat is not None:
+                fit_params['validation_data'] = (X_val_final, y_val_cat)
+            else:
+                fit_params['validation_split'] = self.training_config['validation_split']
 
+            self.training_history = model.fit(**fit_params)
+
+            # Evaluate model
+            self.training_status.setText("Evaluating model...")
+            QApplication.processEvents()
+            test_loss, test_accuracy = model.evaluate(X_test_final, y_test_cat)
+            
             # Update visualization with training history
-            self.plot_training_history(history)
+            self.plot_training_history(self.training_history)
+            
+            # Update metrics
+            metrics_text = f"Test Loss: {test_loss:.4f}\n"
+            metrics_text += f"Test Accuracy: {test_accuracy:.4f}\n"
+            self.metrics_text.setText(metrics_text)
 
             self.status_bar.showMessage("Neural Network Training Complete")
+            self.training_status.setText("Training Complete")
+            self.training_progress.setValue(100)
 
         except Exception as e:
             self.show_error(f"Error training neural network: {str(e)}")
+            self.training_status.setText("Training Failed!")
+            self.training_progress.setValue(0)
 
     def create_neural_network(self):
         """Create neural network based on current configuration"""
-        model = models.Sequential()
+        if self.base_model:
+            # We have a pre-trained base model. The self.layer_config defines the head.
+            # The base_model's input is the model's input.
+            # The head layers are added on top of the base_model's output.
+            
+            # Ensure base_model is a Keras Model instance
+            if not isinstance(self.base_model, tf.keras.Model):
+                self.show_error("Base model is not a valid Keras model instance.")
+                # Potentially clear self.base_model here or handle error more gracefully
+                return None 
 
-        # Add layers based on configuration
-        for layer_config in self.layer_config:
-            layer_type = layer_config["type"]
-            params = layer_config["params"]
+            # Create a new model starting with the base_model
+            # It's crucial that base_model.input and base_model.output are used correctly.
+            x = self.base_model.output
+            # Add layers from self.layer_config (which is now just the head)
+            for layer_config_item in self.layer_config: # Renamed to avoid conflict
+                layer_type = layer_config_item["type"]
+                params = layer_config_item["params"]
 
-            if layer_type == "Dense":
-                model.add(layers.Dense(**params))
-            elif layer_type == "Conv2D":
-                # Add input shape for the first layer
-                if len(model.layers) == 0:
-                    params['input_shape'] = self.X_train.shape[1:]
-                model.add(layers.Conv2D(**params))
-            elif layer_type == "MaxPooling2D":
-                model.add(layers.MaxPooling2D())
-            elif layer_type == "Flatten":
-                model.add(layers.Flatten())
-            elif layer_type == "Dropout":
-                model.add(layers.Dropout(**params))
+                if layer_type == "Dense":
+                    x = layers.Dense(**params)(x)
+                elif layer_type == "Conv2D": # Should not typically be in a head after a modern base
+                    x = layers.Conv2D(**params)(x)
+                elif layer_type == "MaxPooling2D": # Should not typically be in a head
+                    x = layers.MaxPooling2D(**params)(x)
+                elif layer_type == "Flatten":
+                    x = layers.Flatten()(x)
+                elif layer_type == "Dropout":
+                    x = layers.Dropout(**params)(x)
+                elif layer_type == "GlobalAveragePooling2D":
+                    x = layers.GlobalAveragePooling2D(**params)(x)
+                # Add other relevant head layers here if needed
+            
+            # Create the final model with the base_model's input and the new head's output
+            model = models.Model(inputs=self.base_model.input, outputs=x)
+        
+        else:
+            # No pre-trained model, build from scratch using self.layer_config
+            model = models.Sequential()
+            for layer_config_item in self.layer_config: # Renamed to avoid conflict
+                layer_type = layer_config_item["type"]
+                params = layer_config_item["params"]
 
-        # Add output layer based on number of classes
-        num_classes = len(np.unique(self.y_train))
-        model.add(layers.Dense(num_classes, activation='softmax'))
-
+                if layer_type == "Dense":
+                    model.add(layers.Dense(**params))
+                elif layer_type == "Conv2D":
+                    model.add(layers.Conv2D(**params))
+                elif layer_type == "MaxPooling2D":
+                    model.add(layers.MaxPooling2D(**params))
+                elif layer_type == "Flatten":
+                    model.add(layers.Flatten())
+                elif layer_type == "Dropout":
+                    model.add(layers.Dropout(**params))
+                elif layer_type == "GlobalAveragePooling2D":
+                    model.add(layers.GlobalAveragePooling2D(**params))
+                # Ensure all custom layers are handled here
         return model
 
     def train_model(self, model_name, params):
@@ -1451,15 +1839,33 @@ class MLCourseGUI(QMainWindow):
     def create_progress_callback(self):
         """Create callback for updating progress bar during training"""
         class ProgressCallback(tf.keras.callbacks.Callback):
-            def __init__(self, progress_bar):
+            def __init__(self, progress_bar, epoch_details_text_area, training_status_label, training_progress_bar):
                 super().__init__()
-                self.progress_bar = progress_bar
+                self.progress_bar = progress_bar # Main status bar progress
+                self.epoch_details_text_area = epoch_details_text_area
+                self.training_status_label = training_status_label
+                self.training_progress_bar = training_progress_bar # Tab-specific progress bar
+
+            def on_epoch_begin(self, epoch, logs=None):
+                # Update status at the beginning of each epoch
+                self.training_status_label.setText(f"Training... Epoch {epoch + 1}/{self.params['epochs']}")
+                QApplication.processEvents()
 
             def on_epoch_end(self, epoch, logs=None):
                 progress = int(((epoch + 1) / self.params['epochs']) * 100)
-                self.progress_bar.setValue(progress)
+                self.progress_bar.setValue(progress) # Update main status bar progress
+                self.training_progress_bar.setValue(progress) # Update tab-specific progress bar
+                
+                # Append epoch details to the text area
+                epoch_info = f"Epoch {epoch + 1}/{self.params['epochs']}:\n"
+                if logs:
+                    for metric, value in logs.items():
+                        epoch_info += f"  {metric}: {value:.4f}\n"
+                epoch_info += "-"*20 + "\n"
+                self.epoch_details_text_area.append(epoch_info)
+                QApplication.processEvents() # Ensure UI updates
 
-        return ProgressCallback(self.progress_bar)
+        return ProgressCallback(self.progress_bar, self.epoch_details_text, self.training_status, self.training_progress)
 
     def update_visualization(self, y_pred):
         """Update the visualization with current results"""
@@ -1575,19 +1981,19 @@ class MLCourseGUI(QMainWindow):
             metrics_text += "Per-Class Metrics:\n"
             for i in range(n_classes):
                 metrics_text += f"\nClass {i}:\n"
-                metrics_text += f"Precision: {precision[i]:.4f}\n"
-                metrics_text += f"Recall: {recall[i]:.4f}\n"
-                metrics_text += f"F1-Score: {f1[i]:.4f}\n"
+                metrics_text += f"  Precision: {precision[i]:.4f}\n"
+                metrics_text += f"  Recall: {recall[i]:.4f}\n"
+                metrics_text += f"  F1-Score: {f1[i]:.4f}\n"
 
             metrics_text += "\nMacro Averages:\n"
-            metrics_text += f"Macro Precision: {macro_precision:.4f}\n"
-            metrics_text += f"Macro Recall: {macro_recall:.4f}\n"
-            metrics_text += f"Macro F1-Score: {macro_f1:.4f}\n"
+            metrics_text += f"  Macro Precision: {macro_precision:.4f}\n"
+            metrics_text += f"  Macro Recall: {macro_recall:.4f}\n"
+            metrics_text += f"  Macro F1-Score: {macro_f1:.4f}\n"
 
             metrics_text += "\nWeighted Averages:\n"
-            metrics_text += f"Weighted Precision: {weighted_precision:.4f}\n"
-            metrics_text += f"Weighted Recall: {weighted_recall:.4f}\n"
-            metrics_text += f"Weighted F1-Score: {weighted_f1:.4f}\n"
+            metrics_text += f"  Weighted Precision: {weighted_precision:.4f}\n"
+            metrics_text += f"  Weighted Recall: {weighted_recall:.4f}\n"
+            metrics_text += f"  Weighted F1-Score: {weighted_f1:.4f}\n\n"
 
             metrics_text += "Confusion Matrix:\n"
             metrics_text += str(conf_matrix)
@@ -2280,6 +2686,1244 @@ class MLCourseGUI(QMainWindow):
         except Exception as e:
             self.show_error(f"Error in cross-validation: {str(e)}")
 
+    def remove_selected_layer(self):
+        """Remove the selected layer from the model architecture"""
+        # Get selected layer index from the layer list
+        selected_items = self.layer_list_widget.findChildren(QWidget, "layer_item")
+        for i, item in enumerate(selected_items):
+            if item.property("selected"):
+                if 0 <= i < len(self.layer_config):
+                    self.layer_config.pop(i)
+                    self.update_layer_list()
+                break
+
+    def move_layer(self, direction):
+        """Move a layer up or down in the architecture"""
+        selected_items = self.layer_list_widget.findChildren(QWidget, "layer_item")
+        for i, item in enumerate(selected_items):
+            if item.property("selected"):
+                new_index = i + direction
+                if 0 <= new_index < len(self.layer_config):
+                    # Swap layer configurations
+                    self.layer_config[i], self.layer_config[new_index] = \
+                        self.layer_config[new_index], self.layer_config[i]
+                    self.update_layer_list()
+                break
+
+    def update_layer_list(self):
+        """Update the layer list display"""
+        # Clear existing layer items
+        while self.layer_list_layout.count():
+            item = self.layer_list_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        # Add current layers to the list
+        for i, layer in enumerate(self.layer_config):
+            layer_item = QWidget()
+            layer_item.setObjectName("layer_item")
+            layer_layout = QHBoxLayout(layer_item)
+
+            # Layer type and parameters
+            layer_info = f"{i+1}. {layer['type']}"
+            if 'params' in layer:
+                params_str = ", ".join(f"{k}={v}" for k, v in layer['params'].items())
+                layer_info += f" ({params_str})"
+            
+            layer_label = QLabel(layer_info)
+            layer_layout.addWidget(layer_label)
+
+            # Selection checkbox
+            select_checkbox = QCheckBox()
+            select_checkbox.stateChanged.connect(
+                lambda state, item=layer_item: self.toggle_layer_selection(item, state))
+            layer_layout.addWidget(select_checkbox)
+
+            self.layer_list_layout.addWidget(layer_item)
+        
+        # Update the model summary
+        self.update_model_summary()
+
+    def toggle_layer_selection(self, layer_item, state):
+        """Toggle selection state of a layer item"""
+        # Deselect all other layers
+        for item in self.layer_list_widget.findChildren(QWidget, "layer_item"):
+            if item != layer_item:
+                item.setProperty("selected", False)
+                item.style().unpolish(item)
+                item.style().polish(item)
+
+        # Set selection state for this layer
+        layer_item.setProperty("selected", state == Qt.CheckState.Checked.value)
+        layer_item.style().unpolish(layer_item)
+        layer_item.style().polish(layer_item)
+
+    def save_model_architecture(self):
+        """Save the current model architecture to a file"""
+        if not self.layer_config:
+            self.show_error("No model architecture to save")
+            return
+
+        try:
+            # Get save file path
+            file_path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Save Model Architecture",
+                "",
+                "JSON files (*.json);;HDF5 files (*.h5)"
+            )
+
+            if not file_path:
+                return
+
+            if file_path.endswith('.json'):
+                # Save as JSON
+                model_json = {
+                    'layers': self.layer_config,
+                    'input_shape': self.X_train.shape[1:] if self.X_train is not None else None
+                }
+                with open(file_path, 'w') as f:
+                    json.dump(model_json, f, indent=2)
+            else:
+                # Save as HDF5
+                model = self.create_neural_network()
+                model.save(file_path)
+
+            self.status_bar.showMessage(f"Model architecture saved to {file_path}")
+
+        except Exception as e:
+            self.show_error(f"Error saving model architecture: {str(e)}")
+
+    def load_model_architecture(self):
+        """Load a model architecture from a file"""
+        try:
+            # Get load file path
+            file_path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Load Model Architecture",
+                "",
+                "JSON files (*.json);;HDF5 files (*.h5)"
+            )
+
+            if not file_path:
+                return
+
+            if file_path.endswith('.json'):
+                # Load from JSON
+                with open(file_path, 'r') as f:
+                    model_json = json.load(f)
+                self.layer_config = model_json['layers']
+            else:
+                # Load from HDF5
+                model = tf.keras.models.load_model(file_path)
+                self.layer_config = []
+                
+                # Convert model layers to configuration
+                for layer in model.layers:
+                    if isinstance(layer, (layers.Dense, layers.Conv2D, layers.MaxPooling2D,
+                                        layers.Flatten, layers.Dropout, layers.LSTM, layers.GRU)):
+                        layer_config = {
+                            'type': layer.__class__.__name__,
+                            'params': self._get_layer_params(layer)
+                        }
+                        self.layer_config.append(layer_config)
+
+            self.update_layer_list()
+            self.status_bar.showMessage(f"Model architecture loaded from {file_path}")
+
+        except Exception as e:
+            self.show_error(f"Error loading model architecture: {str(e)}")
+
+    def _get_layer_params(self, layer):
+        """Extract parameters from a Keras layer"""
+        params = {}
+        
+        if isinstance(layer, layers.Dense):
+            params['units'] = layer.units
+            params['activation'] = layer.activation.__name__
+        elif isinstance(layer, layers.Conv2D):
+            params['filters'] = layer.filters
+            params['kernel_size'] = layer.kernel_size
+            params['activation'] = layer.activation.__name__
+        elif isinstance(layer, layers.MaxPooling2D):
+            params['pool_size'] = layer.pool_size
+        elif isinstance(layer, layers.Dropout):
+            params['rate'] = layer.rate
+        elif isinstance(layer, (layers.LSTM, layers.GRU)):
+            params['units'] = layer.units
+            params['return_sequences'] = layer.return_sequences
+            
+        return params
+
+    def load_pretrained_model(self):
+        """Load and configure a pretrained model"""
+        try:
+            model_name = self.pretrained_model_combo.currentText()
+            
+            # Load pretrained model
+            if model_name == "VGG16":
+                base_model = tf.keras.applications.VGG16(
+                    include_top=False,
+                    weights='imagenet',
+                    input_shape=(224, 224, 3)
+                )
+            elif model_name == "ResNet50":
+                base_model = tf.keras.applications.ResNet50(
+                    include_top=False,
+                    weights='imagenet',
+                    input_shape=(224, 224, 3)
+                )
+            elif model_name == "MobileNetV2":
+                base_model = tf.keras.applications.MobileNetV2(
+                    include_top=False,
+                    weights='imagenet',
+                    input_shape=(224, 224, 3)
+                )
+            
+            # Freeze base layers if requested
+            if self.freeze_layers.isChecked():
+                base_model.trainable = False
+            
+            # Clear existing layer configuration
+            self.layer_config = []
+            
+            # Add base model layers
+            for layer in base_model.layers:
+                layer_config = {
+                    'type': layer.__class__.__name__,
+                    'params': self._get_layer_params(layer)
+                }
+                self.layer_config.append(layer_config)
+            
+            # Add classification head
+            self.layer_config.extend([
+                {
+                    'type': 'Flatten',
+                    'params': {}
+                },
+                {
+                    'type': 'Dense',
+                    'params': {
+                        'units': 512,
+                        'activation': 'relu'
+                    }
+                },
+                {
+                    'type': 'Dropout',
+                    'params': {
+                        'rate': 0.5
+                    }
+                },
+                {
+                    'type': 'Dense',
+                    'params': {
+                        'units': len(np.unique(self.y_train)) if self.y_train is not None else 1000,
+                        'activation': 'softmax'
+                    }
+                }
+            ])
+            
+            self.update_layer_list()
+            self.status_bar.showMessage(f"Loaded {model_name} pretrained model")
+            
+        except Exception as e:
+            self.show_error(f"Error loading pretrained model: {str(e)}")
+
+    def configure_training(self):
+        """Open a dialog to configure training parameters"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Configure Training")
+        layout = QVBoxLayout(dialog)
+
+        # Optimizer section
+        optimizer_group = QGroupBox("Optimizer")
+        optimizer_layout = QVBoxLayout()
+
+        # Optimizer type
+        opt_type_layout = QHBoxLayout()
+        opt_type_label = QLabel("Optimizer:")
+        opt_type_combo = QComboBox()
+        opt_type_combo.addItems(["Adam", "SGD", "RMSprop", "AdamW"])
+        # Set default optimizer if it exists
+        if hasattr(self, 'optimizer'):
+            if isinstance(self.optimizer, tf.keras.optimizers.Adam):
+                opt_type_combo.setCurrentText("Adam")
+            elif isinstance(self.optimizer, tf.keras.optimizers.SGD):
+                opt_type_combo.setCurrentText("SGD")
+            elif isinstance(self.optimizer, tf.keras.optimizers.RMSprop):
+                opt_type_combo.setCurrentText("RMSprop")
+            elif isinstance(self.optimizer, tf.keras.optimizers.AdamW):
+                opt_type_combo.setCurrentText("AdamW")
+        opt_type_layout.addWidget(opt_type_label)
+        opt_type_layout.addWidget(opt_type_combo)
+        optimizer_layout.addLayout(opt_type_layout)
+
+        # Learning rate
+        lr_layout = QHBoxLayout()
+        lr_label = QLabel("Learning Rate:")
+        lr_input = QDoubleSpinBox()
+        lr_input.setRange(0.00001, 1.0)
+        lr_input.setValue(0.001)
+        lr_input.setSingleStep(0.0001)
+        lr_input.setDecimals(5)
+        # Set current learning rate if optimizer exists
+        if hasattr(self, 'optimizer'):
+            lr_input.setValue(float(self.optimizer.learning_rate.numpy()))
+        lr_layout.addWidget(lr_label)
+        lr_layout.addWidget(lr_input)
+        optimizer_layout.addLayout(lr_layout)
+
+        # Optimizer-specific parameters
+        opt_params_group = QGroupBox("Optimizer Parameters")
+        opt_params_layout = QVBoxLayout()
+        self.opt_param_inputs = {}
+
+        def update_opt_params():
+            # Clear existing parameter inputs
+            for widget in list(self.opt_param_inputs.values()):
+                opt_params_layout.removeWidget(widget)
+                widget.deleteLater()
+            self.opt_param_inputs.clear()
+
+            opt_type = opt_type_combo.currentText()
+            
+            if opt_type == "Adam":
+                # Beta1
+                beta1_label = QLabel("Beta1:")
+                beta1_input = QDoubleSpinBox()
+                beta1_input.setRange(0.0, 1.0)
+                beta1_input.setValue(0.9)
+                beta1_input.setSingleStep(0.01)
+                if hasattr(self, 'optimizer') and isinstance(self.optimizer, tf.keras.optimizers.Adam):
+                    beta1 = self.optimizer.beta_1
+                    beta1_input.setValue(float(beta1.numpy()) if hasattr(beta1, 'numpy') else float(beta1))
+                self.opt_param_inputs["beta_1"] = beta1_input
+                opt_params_layout.addWidget(beta1_label)
+                opt_params_layout.addWidget(beta1_input)
+
+                # Beta2
+                beta2_label = QLabel("Beta2:")
+                beta2_input = QDoubleSpinBox()
+                beta2_input.setRange(0.0, 1.0)
+                beta2_input.setValue(0.999)
+                beta2_input.setSingleStep(0.001)
+                if hasattr(self, 'optimizer') and isinstance(self.optimizer, tf.keras.optimizers.Adam):
+                    beta2 = self.optimizer.beta_2
+                    beta2_input.setValue(float(beta2.numpy()) if hasattr(beta2, 'numpy') else float(beta2))
+                self.opt_param_inputs["beta_2"] = beta2_input
+                opt_params_layout.addWidget(beta2_label)
+                opt_params_layout.addWidget(beta2_input)
+
+                # Epsilon
+                epsilon_label = QLabel("Epsilon:")
+                epsilon_input = QDoubleSpinBox()
+                epsilon_input.setRange(1e-10, 1e-6)
+                epsilon_input.setValue(1e-7)
+                epsilon_input.setSingleStep(1e-8)
+                epsilon_input.setDecimals(10)
+                if hasattr(self, 'optimizer') and isinstance(self.optimizer, tf.keras.optimizers.Adam):
+                    epsilon = self.optimizer.epsilon
+                    epsilon_input.setValue(float(epsilon.numpy()) if hasattr(epsilon, 'numpy') else float(epsilon))
+                self.opt_param_inputs["epsilon"] = epsilon_input
+                opt_params_layout.addWidget(epsilon_label)
+                opt_params_layout.addWidget(epsilon_input)
+
+            elif opt_type == "SGD":
+                # Momentum
+                momentum_label = QLabel("Momentum:")
+                momentum_input = QDoubleSpinBox()
+                momentum_input.setRange(0.0, 1.0)
+                momentum_input.setValue(0.9)
+                momentum_input.setSingleStep(0.1)
+                if hasattr(self, 'optimizer') and isinstance(self.optimizer, tf.keras.optimizers.SGD):
+                    momentum = self.optimizer.momentum
+                    momentum_input.setValue(float(momentum.numpy()) if hasattr(momentum, 'numpy') else float(momentum))
+                self.opt_param_inputs["momentum"] = momentum_input
+                opt_params_layout.addWidget(momentum_label)
+                opt_params_layout.addWidget(momentum_input)
+
+                # Nesterov
+                nesterov_label = QLabel("Nesterov Momentum:")
+                nesterov_checkbox = QCheckBox()
+                if hasattr(self, 'optimizer') and isinstance(self.optimizer, tf.keras.optimizers.SGD):
+                    nesterov_checkbox.setChecked(self.optimizer.nesterov)
+                self.opt_param_inputs["nesterov"] = nesterov_checkbox
+                opt_params_layout.addWidget(nesterov_label)
+                opt_params_layout.addWidget(nesterov_checkbox)
+
+            elif opt_type == "RMSprop":
+                # Rho
+                rho_label = QLabel("Rho:")
+                rho_input = QDoubleSpinBox()
+                rho_input.setRange(0.0, 1.0)
+                rho_input.setValue(0.9)
+                rho_input.setSingleStep(0.01)
+                if hasattr(self, 'optimizer') and isinstance(self.optimizer, tf.keras.optimizers.RMSprop):
+                    rho = self.optimizer.rho
+                    rho_input.setValue(float(rho.numpy()) if hasattr(rho, 'numpy') else float(rho))
+                self.opt_param_inputs["rho"] = rho_input
+                opt_params_layout.addWidget(rho_label)
+                opt_params_layout.addWidget(rho_input)
+
+                # Epsilon
+                epsilon_label = QLabel("Epsilon:")
+                epsilon_input = QDoubleSpinBox()
+                epsilon_input.setRange(1e-10, 1e-6)
+                epsilon_input.setValue(1e-7)
+                epsilon_input.setSingleStep(1e-8)
+                epsilon_input.setDecimals(10)
+                if hasattr(self, 'optimizer') and isinstance(self.optimizer, tf.keras.optimizers.RMSprop):
+                    epsilon = self.optimizer.epsilon
+                    epsilon_input.setValue(float(epsilon.numpy()) if hasattr(epsilon, 'numpy') else float(epsilon))
+                self.opt_param_inputs["epsilon"] = epsilon_input
+                opt_params_layout.addWidget(epsilon_label)
+                opt_params_layout.addWidget(epsilon_input)
+
+            elif opt_type == "AdamW":
+                # Weight decay
+                wd_label = QLabel("Weight Decay:")
+                wd_input = QDoubleSpinBox()
+                wd_input.setRange(0.0, 0.1)
+                wd_input.setValue(0.01)
+                wd_input.setSingleStep(0.001)
+                if hasattr(self, 'optimizer') and isinstance(self.optimizer, tf.keras.optimizers.AdamW):
+                    wd = self.optimizer.weight_decay
+                    wd_input.setValue(float(wd.numpy()) if hasattr(wd, 'numpy') else float(wd))
+                self.opt_param_inputs["weight_decay"] = wd_input
+                opt_params_layout.addWidget(wd_label)
+                opt_params_layout.addWidget(wd_input)
+
+                # Beta1
+                beta1_label = QLabel("Beta1:")
+                beta1_input = QDoubleSpinBox()
+                beta1_input.setRange(0.0, 1.0)
+                beta1_input.setValue(0.9)
+                beta1_input.setSingleStep(0.01)
+                if hasattr(self, 'optimizer') and isinstance(self.optimizer, tf.keras.optimizers.AdamW):
+                    beta1 = self.optimizer.beta_1
+                    beta1_input.setValue(float(beta1.numpy()) if hasattr(beta1, 'numpy') else float(beta1))
+                self.opt_param_inputs["beta_1"] = beta1_input
+                opt_params_layout.addWidget(beta1_label)
+                opt_params_layout.addWidget(beta1_input)
+
+                # Beta2
+                beta2_label = QLabel("Beta2:")
+                beta2_input = QDoubleSpinBox()
+                beta2_input.setRange(0.0, 1.0)
+                beta2_input.setValue(0.999)
+                beta2_input.setSingleStep(0.001)
+                if hasattr(self, 'optimizer') and isinstance(self.optimizer, tf.keras.optimizers.AdamW):
+                    beta2 = self.optimizer.beta_2
+                    beta2_input.setValue(float(beta2.numpy()) if hasattr(beta2, 'numpy') else float(beta2))
+                self.opt_param_inputs["beta_2"] = beta2_input
+                opt_params_layout.addWidget(beta2_label)
+                opt_params_layout.addWidget(beta2_input)
+
+        opt_type_combo.currentIndexChanged.connect(update_opt_params)
+        update_opt_params()
+
+        opt_params_group.setLayout(opt_params_layout)
+        optimizer_layout.addWidget(opt_params_group)
+        optimizer_group.setLayout(optimizer_layout)
+        layout.addWidget(optimizer_group)
+
+        # Training configuration section
+        training_group = QGroupBox("Training Configuration")
+        training_layout = QVBoxLayout()
+
+        # Batch size
+        batch_layout = QHBoxLayout()
+        batch_label = QLabel("Batch Size:")
+        batch_input = QSpinBox()
+        batch_input.setRange(1, 1024)
+        batch_input.setValue(32)
+        batch_input.setSingleStep(8)
+        if hasattr(self, 'training_config'):
+            batch_input.setValue(self.training_config['batch_size'])
+        batch_layout.addWidget(batch_label)
+        batch_layout.addWidget(batch_input)
+        training_layout.addLayout(batch_layout)
+
+        # Epochs
+        epochs_layout = QHBoxLayout()
+        epochs_label = QLabel("Epochs:")
+        epochs_input = QSpinBox()
+        epochs_input.setRange(1, 1000)
+        epochs_input.setValue(100)
+        if hasattr(self, 'training_config'):
+            epochs_input.setValue(self.training_config['epochs'])
+        epochs_layout.addWidget(epochs_label)
+        epochs_layout.addWidget(epochs_input)
+        training_layout.addLayout(epochs_layout)
+
+        # Validation split
+        val_split_layout = QHBoxLayout()
+        val_split_label = QLabel("Validation Split:")
+        val_split_input = QDoubleSpinBox()
+        val_split_input.setRange(0.0, 0.5)
+        val_split_input.setValue(0.2)
+        val_split_input.setSingleStep(0.05)
+        if hasattr(self, 'training_config'):
+            val_split_input.setValue(self.training_config['validation_split'])
+        val_split_layout.addWidget(val_split_label)
+        val_split_layout.addWidget(val_split_input)
+        training_layout.addLayout(val_split_layout)
+
+        # Early stopping
+        early_stop_group = QGroupBox("Early Stopping")
+        early_stop_layout = QVBoxLayout()
+
+        # Enable early stopping
+        enable_es_label = QLabel("Enable Early Stopping:")
+        enable_es_checkbox = QCheckBox()
+        if hasattr(self, 'training_config'):
+            enable_es_checkbox.setChecked(self.training_config['early_stopping']['enable'])
+        early_stop_layout.addWidget(enable_es_label)
+        early_stop_layout.addWidget(enable_es_checkbox)
+
+        # Patience
+        patience_layout = QHBoxLayout()
+        patience_label = QLabel("Patience:")
+        patience_input = QSpinBox()
+        patience_input.setRange(1, 100)
+        patience_input.setValue(10)
+        if hasattr(self, 'training_config'):
+            patience_input.setValue(self.training_config['early_stopping']['patience'])
+        patience_layout.addWidget(patience_label)
+        patience_layout.addWidget(patience_input)
+        early_stop_layout.addLayout(patience_layout)
+
+        # Min delta
+        min_delta_layout = QHBoxLayout()
+        min_delta_label = QLabel("Min Delta:")
+        min_delta_input = QDoubleSpinBox()
+        min_delta_input.setRange(0.0, 0.1)
+        min_delta_input.setValue(0.001)
+        min_delta_input.setSingleStep(0.001)
+        if hasattr(self, 'training_config'):
+            min_delta_input.setValue(self.training_config['early_stopping']['min_delta'])
+        min_delta_layout.addWidget(min_delta_label)
+        min_delta_layout.addWidget(min_delta_input)
+        early_stop_layout.addLayout(min_delta_layout)
+
+        early_stop_group.setLayout(early_stop_layout)
+        training_layout.addWidget(early_stop_group)
+
+        # Learning rate schedule
+        lr_schedule_group = QGroupBox("Learning Rate Schedule")
+        lr_schedule_layout = QVBoxLayout()
+
+        # Schedule type
+        schedule_type_layout = QHBoxLayout()
+        schedule_type_label = QLabel("Schedule Type:")
+        schedule_type_combo = QComboBox()
+        schedule_type_combo.addItems(["None", "Exponential Decay", "Cosine Decay", "Step Decay"])
+        if hasattr(self, 'lr_schedule'):
+            if isinstance(self.lr_schedule, tf.keras.optimizers.schedules.ExponentialDecay):
+                schedule_type_combo.setCurrentText("Exponential Decay")
+            elif isinstance(self.lr_schedule, tf.keras.optimizers.schedules.CosineDecay):
+                schedule_type_combo.setCurrentText("Cosine Decay")
+            elif isinstance(self.lr_schedule, tf.keras.optimizers.schedules.ExponentialDecay) and getattr(self.lr_schedule, 'staircase', False):
+                schedule_type_combo.setCurrentText("Step Decay")
+        schedule_type_layout.addWidget(schedule_type_label)
+        schedule_type_layout.addWidget(schedule_type_combo)
+        lr_schedule_layout.addLayout(schedule_type_layout)
+
+        # Schedule parameters
+        schedule_params_group = QGroupBox("Schedule Parameters")
+        schedule_params_layout = QVBoxLayout()
+        self.schedule_param_inputs = {}
+
+        def update_schedule_params():
+            # Clear existing parameter inputs
+            for widget in list(self.schedule_param_inputs.values()):
+                schedule_params_layout.removeWidget(widget)
+                widget.deleteLater()
+            self.schedule_param_inputs.clear()
+
+            schedule_type = schedule_type_combo.currentText()
+            
+            if schedule_type == "Exponential Decay":
+                # Decay rate
+                decay_rate_label = QLabel("Decay Rate:")
+                decay_rate_input = QDoubleSpinBox()
+                decay_rate_input.setRange(0.0, 1.0)
+                decay_rate_input.setValue(0.9)
+                decay_rate_input.setSingleStep(0.01)
+                if hasattr(self, 'lr_schedule') and isinstance(self.lr_schedule, tf.keras.optimizers.schedules.ExponentialDecay):
+                    decay_rate_input.setValue(self.lr_schedule.decay_rate.numpy())
+                self.schedule_param_inputs["decay_rate"] = decay_rate_input
+                schedule_params_layout.addWidget(decay_rate_label)
+                schedule_params_layout.addWidget(decay_rate_input)
+
+                # Decay steps
+                decay_steps_label = QLabel("Decay Steps:")
+                decay_steps_input = QSpinBox()
+                decay_steps_input.setRange(1, 10000)
+                decay_steps_input.setValue(1000)
+                if hasattr(self, 'lr_schedule') and isinstance(self.lr_schedule, tf.keras.optimizers.schedules.ExponentialDecay):
+                    decay_steps_input.setValue(self.lr_schedule.decay_steps.numpy())
+                self.schedule_param_inputs["decay_steps"] = decay_steps_input
+                schedule_params_layout.addWidget(decay_steps_label)
+                schedule_params_layout.addWidget(decay_steps_input)
+
+            elif schedule_type == "Cosine Decay":
+                # Initial learning rate
+                initial_lr_label = QLabel("Initial Learning Rate:")
+                initial_lr_input = QDoubleSpinBox()
+                initial_lr_input.setRange(0.00001, 1.0)
+                initial_lr_input.setValue(0.001)
+                initial_lr_input.setSingleStep(0.0001)
+                initial_lr_input.setDecimals(5)
+                if hasattr(self, 'lr_schedule') and isinstance(self.lr_schedule, tf.keras.optimizers.schedules.CosineDecay):
+                    initial_lr_input.setValue(self.lr_schedule.initial_learning_rate.numpy())
+                self.schedule_param_inputs["initial_learning_rate"] = initial_lr_input
+                schedule_params_layout.addWidget(initial_lr_label)
+                schedule_params_layout.addWidget(initial_lr_input)
+
+                # Decay steps
+                decay_steps_label = QLabel("Decay Steps:")
+                decay_steps_input = QSpinBox()
+                decay_steps_input.setRange(1, 10000)
+                decay_steps_input.setValue(1000)
+                if hasattr(self, 'lr_schedule') and isinstance(self.lr_schedule, tf.keras.optimizers.schedules.CosineDecay):
+                    decay_steps_input.setValue(self.lr_schedule.decay_steps.numpy())
+                self.schedule_param_inputs["decay_steps"] = decay_steps_input
+                schedule_params_layout.addWidget(decay_steps_label)
+                schedule_params_layout.addWidget(decay_steps_input)
+
+                # Alpha
+                alpha_label = QLabel("Alpha (min lr factor):")
+                alpha_input = QDoubleSpinBox()
+                alpha_input.setRange(0.0, 1.0)
+                alpha_input.setValue(0.0001)
+                alpha_input.setSingleStep(0.0001)
+                if hasattr(self, 'lr_schedule') and isinstance(self.lr_schedule, tf.keras.optimizers.schedules.CosineDecay):
+                    alpha_input.setValue(self.lr_schedule.alpha.numpy())
+                self.schedule_param_inputs["alpha"] = alpha_input
+                schedule_params_layout.addWidget(alpha_label)
+                schedule_params_layout.addWidget(alpha_input)
+
+            elif schedule_type == "Step Decay":
+                # Decay rate
+                decay_rate_label = QLabel("Decay Rate:")
+                decay_rate_input = QDoubleSpinBox()
+                decay_rate_input.setRange(0.0, 1.0)
+                decay_rate_input.setValue(0.1)
+                decay_rate_input.setSingleStep(0.1)
+                if hasattr(self, 'lr_schedule') and isinstance(self.lr_schedule, tf.keras.optimizers.schedules.ExponentialDecay):
+                    decay_rate_input.setValue(self.lr_schedule.decay_rate.numpy())
+                self.schedule_param_inputs["decay_rate"] = decay_rate_input
+                schedule_params_layout.addWidget(decay_rate_label)
+                schedule_params_layout.addWidget(decay_rate_input)
+
+                # Decay steps
+                decay_steps_label = QLabel("Decay Steps:")
+                decay_steps_input = QSpinBox()
+                decay_steps_input.setRange(1, 1000)
+                decay_steps_input.setValue(10)
+                if hasattr(self, 'lr_schedule') and isinstance(self.lr_schedule, tf.keras.optimizers.schedules.ExponentialDecay):
+                    decay_steps_input.setValue(self.lr_schedule.decay_steps.numpy())
+                self.schedule_param_inputs["decay_steps"] = decay_steps_input
+                schedule_params_layout.addWidget(decay_steps_label)
+                schedule_params_layout.addWidget(decay_steps_input)
+
+        schedule_type_combo.currentIndexChanged.connect(update_schedule_params)
+        update_schedule_params()
+
+        schedule_params_group.setLayout(schedule_params_layout)
+        lr_schedule_layout.addWidget(schedule_params_group)
+        lr_schedule_group.setLayout(lr_schedule_layout)
+        training_layout.addWidget(lr_schedule_group)
+
+        training_group.setLayout(training_layout)
+        layout.addWidget(training_group)
+
+        # Buttons
+        btn_layout = QHBoxLayout()
+        save_btn = QPushButton("Save Configuration")
+        cancel_btn = QPushButton("Cancel")
+        btn_layout.addWidget(save_btn)
+        btn_layout.addWidget(cancel_btn)
+        layout.addLayout(btn_layout)
+
+        def save_config():
+            # Collect optimizer configuration
+            opt_type = opt_type_combo.currentText()
+            opt_params = {
+                "learning_rate": lr_input.value()
+            }
+
+            # Add optimizer-specific parameters
+            for param_name, widget in self.opt_param_inputs.items():
+                if isinstance(widget, QSpinBox):
+                    opt_params[param_name] = widget.value()
+                elif isinstance(widget, QDoubleSpinBox):
+                    opt_params[param_name] = widget.value()
+                elif isinstance(widget, QComboBox):
+                    opt_params[param_name] = widget.currentText()
+                elif isinstance(widget, QCheckBox):
+                    opt_params[param_name] = widget.isChecked()
+
+            # Create optimizer
+            if opt_type == "Adam":
+                self.optimizer = tf.keras.optimizers.Adam(**opt_params)
+            elif opt_type == "SGD":
+                self.optimizer = tf.keras.optimizers.SGD(**opt_params)
+            elif opt_type == "RMSprop":
+                self.optimizer = tf.keras.optimizers.RMSprop(**opt_params)
+            elif opt_type == "AdamW":
+                self.optimizer = tf.keras.optimizers.AdamW(**opt_params)
+
+            # Collect training configuration
+            self.training_config = {
+                "batch_size": batch_input.value(),
+                "epochs": epochs_input.value(),
+                "validation_split": val_split_input.value(),
+                "early_stopping": {
+                    "enable": enable_es_checkbox.isChecked(),
+                    "patience": patience_input.value(),
+                    "min_delta": min_delta_input.value()
+                }
+            }
+
+            # Collect learning rate schedule configuration
+            schedule_type = schedule_type_combo.currentText()
+            if schedule_type != "None":
+                schedule_params = {}
+                for param_name, widget in self.schedule_param_inputs.items():
+                    if isinstance(widget, QSpinBox):
+                        schedule_params[param_name] = widget.value()
+                    elif isinstance(widget, QDoubleSpinBox):
+                        schedule_params[param_name] = widget.value()
+
+                if schedule_type == "Exponential Decay":
+                    self.lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
+                        initial_learning_rate=opt_params["learning_rate"],
+                        **schedule_params
+                    )
+                elif schedule_type == "Cosine Decay":
+                    self.lr_schedule = tf.keras.optimizers.schedules.CosineDecay(
+                        **schedule_params
+                    )
+                elif schedule_type == "Step Decay":
+                    self.lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
+                        initial_learning_rate=opt_params["learning_rate"],
+                        decay_steps=schedule_params["decay_steps"],
+                        decay_rate=schedule_params["decay_rate"],
+                        staircase=True
+                    )
+
+                # Update optimizer with learning rate schedule
+                self.optimizer.learning_rate = self.lr_schedule
+
+            dialog.accept()
+
+        save_btn.clicked.connect(save_config)
+        cancel_btn.clicked.connect(dialog.reject)
+
+        dialog.exec()
+
+    def create_training_visualization_tab(self):
+        """Create the training visualization tab"""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        # Training curves
+        curves_group = QGroupBox("Training Curves")
+        curves_layout = QVBoxLayout()
+
+        # Create matplotlib figure for training curves
+        self.training_fig = Figure(figsize=(8, 6))
+        self.training_canvas = FigureCanvas(self.training_fig)
+        curves_layout.addWidget(self.training_canvas)
+
+        # Metrics selection
+        metrics_layout = QHBoxLayout()
+        metrics_label = QLabel("Metrics to Plot:")
+        self.metrics_combo = QComboBox()
+        self.metrics_combo.addItems(["loss", "accuracy", "val_loss", "val_accuracy"])
+        self.metrics_combo.setCurrentText("loss")
+        metrics_layout.addWidget(metrics_label)
+        metrics_layout.addWidget(self.metrics_combo)
+        curves_layout.addLayout(metrics_layout)
+
+        # Update plot button
+        update_plot_btn = QPushButton("Update Plot")
+        update_plot_btn.clicked.connect(self.update_training_plot)
+        curves_layout.addWidget(update_plot_btn)
+
+        curves_group.setLayout(curves_layout)
+        layout.addWidget(curves_group)
+
+        # Weight gradients
+        gradients_group = QGroupBox("Weight Gradients")
+        gradients_layout = QVBoxLayout()
+
+        # Create matplotlib figure for weight gradients
+        self.gradients_fig = Figure(figsize=(8, 6))
+        self.gradients_canvas = FigureCanvas(self.gradients_fig)
+        gradients_layout.addWidget(self.gradients_canvas)
+
+        # Layer selection for gradients
+        layer_layout = QHBoxLayout()
+        layer_label = QLabel("Layer:")
+        self.layer_combo = QComboBox()
+        layer_layout.addWidget(layer_label)
+        layer_layout.addWidget(self.layer_combo)
+        gradients_layout.addLayout(layer_layout)
+
+        # Update gradients button
+        update_gradients_btn = QPushButton("Update Gradients")
+        update_gradients_btn.clicked.connect(self.update_gradients_plot)
+        gradients_layout.addWidget(update_gradients_btn)
+
+        gradients_group.setLayout(gradients_layout)
+        layout.addWidget(gradients_group)
+
+        # Test metrics
+        metrics_group = QGroupBox("Test Metrics")
+        metrics_layout = QVBoxLayout()
+
+        # Create table for test metrics
+        self.metrics_table = QTableWidget()
+        self.metrics_table.setColumnCount(2)
+        self.metrics_table.setHorizontalHeaderLabels(["Metric", "Value"])
+        metrics_layout.addWidget(self.metrics_table)
+
+        # Update metrics button
+        update_metrics_btn = QPushButton("Update Metrics")
+
+    def update_training_plot(self):
+        """Update the training visualization plot with selected metrics"""
+        if not hasattr(self, 'training_history'):
+            self.show_error("No training history available. Please train a model first.")
+            return
+
+        try:
+            # Clear the current figure
+            self.training_fig.clear()
+
+            # Get selected metric
+            metric = self.metrics_combo.currentText()
+
+            # Create plot
+            ax = self.training_fig.add_subplot(111)
+            
+            # Plot training metric
+            if metric in self.training_history.history:
+                ax.plot(self.training_history.history[metric], label=f'Training {metric}')
+            
+            # Plot validation metric if available
+            val_metric = f'val_{metric}'
+            if val_metric in self.training_history.history:
+                ax.plot(self.training_history.history[val_metric], label=f'Validation {metric}')
+
+            # Customize plot
+            ax.set_xlabel('Epoch')
+            ax.set_ylabel(metric.capitalize())
+            ax.set_title(f'Training and Validation {metric.capitalize()}')
+            ax.grid(True)
+            ax.legend()
+
+            # Update canvas
+            self.training_fig.tight_layout()
+            self.training_canvas.draw()
+
+            # Update metrics table
+            self.update_metrics_table()
+
+        except Exception as e:
+            self.show_error(f"Error updating training plot: {str(e)}")
+
+    def update_metrics_table(self):
+        """Update the metrics table with current training metrics"""
+        if not hasattr(self, 'training_history'):
+            return
+
+        try:
+            # Get the final values for each metric
+            metrics = ['loss', 'accuracy', 'val_loss', 'val_accuracy']
+            final_values = {}
+
+            for metric in metrics:
+                if metric in self.training_history.history:
+                    final_values[metric] = self.training_history.history[metric][-1]
+
+            # Update table
+            self.metrics_table.setRowCount(len(final_values))
+            for i, (metric, value) in enumerate(final_values.items()):
+                # Add metric name
+                self.metrics_table.setItem(i, 0, QTableWidgetItem(metric))
+                # Add value with 4 decimal places
+                self.metrics_table.setItem(i, 1, QTableWidgetItem(f"{value:.4f}"))
+
+            # Resize columns to content
+            self.metrics_table.resizeColumnsToContents()
+
+        except Exception as e:
+            self.show_error(f"Error updating metrics table: {str(e)}")
+
+    def update_gradients_plot(self):
+        """Update the weight gradients visualization plot"""
+        if not hasattr(self, 'model') or not hasattr(self, 'training_history'):
+            self.show_error("No model or training history available. Please train a model first.")
+            return
+
+        try:
+            # Clear the current figure
+            self.gradients_fig.clear()
+
+            # Get selected layer
+            layer_name = self.layer_combo.currentText()
+            if not layer_name:
+                return
+
+            # Find the layer in the model
+            layer = None
+            for l in self.model.layers:
+                if l.name == layer_name:
+                    layer = l
+                    break
+
+            if layer is None:
+                self.show_error(f"Layer {layer_name} not found in model")
+                return
+
+            # Get layer weights and gradients
+            weights = layer.get_weights()
+            if not weights:
+                self.show_error(f"No weights found for layer {layer_name}")
+                return
+
+            # Create subplots for each weight matrix
+            n_weights = len(weights)
+            fig_rows = (n_weights + 1) // 2  # Ceiling division
+            fig_cols = min(2, n_weights)
+
+            for i, weight_matrix in enumerate(weights):
+                ax = self.gradients_fig.add_subplot(fig_rows, fig_cols, i + 1)
+                
+                # Plot weight distribution
+                ax.hist(weight_matrix.flatten(), bins=50)
+                ax.set_title(f'Weight Distribution - {layer_name} (Matrix {i+1})')
+                ax.set_xlabel('Weight Value')
+                ax.set_ylabel('Frequency')
+                ax.grid(True)
+
+            # Update canvas
+            self.gradients_fig.tight_layout()
+            self.gradients_canvas.draw()
+
+        except Exception as e:
+            self.show_error(f"Error updating gradients plot: {str(e)}")
+
+    def add_layer_dialog(self):
+        """Open a dialog to add a new layer to the model architecture"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Add Layer")
+        layout = QVBoxLayout(dialog)
+
+        # Layer type selection
+        type_layout = QHBoxLayout()
+        type_label = QLabel("Layer Type:")
+        type_combo = QComboBox()
+        type_combo.addItems([
+            "Dense",
+            "Conv2D",
+            "MaxPooling2D",
+            "Flatten",
+            "Dropout"
+        ])
+        type_layout.addWidget(type_label)
+        type_layout.addWidget(type_combo)
+        layout.addLayout(type_layout)
+
+        # Parameters container
+        params_container = QWidget()
+        params_layout = QVBoxLayout(params_container)
+        layout.addWidget(params_container)
+
+        # Parameter widgets dictionary
+        param_widgets = {}
+
+        def update_params():
+            # Clear existing parameter widgets
+            for widget in list(param_widgets.values()):
+                params_layout.removeWidget(widget)
+                widget.deleteLater()
+            param_widgets.clear()
+
+            layer_type = type_combo.currentText()
+            
+            if layer_type == "Dense":
+                # Units
+                units_label = QLabel("Units:")
+                units_input = QSpinBox()
+                units_input.setRange(1, 1000)
+                units_input.setValue(64)
+                param_widgets["units"] = units_input
+                params_layout.addWidget(units_label)
+                params_layout.addWidget(units_input)
+
+                # Activation
+                activation_label = QLabel("Activation:")
+                activation_combo = QComboBox()
+                activation_combo.addItems(["relu", "sigmoid", "tanh", "softmax", "linear"])
+                param_widgets["activation"] = activation_combo
+                params_layout.addWidget(activation_label)
+                params_layout.addWidget(activation_combo)
+
+            elif layer_type == "Conv2D":
+                # Filters
+                filters_label = QLabel("Filters:")
+                filters_input = QSpinBox()
+                filters_input.setRange(1, 512)
+                filters_input.setValue(32)
+                param_widgets["filters"] = filters_input
+                params_layout.addWidget(filters_label)
+                params_layout.addWidget(filters_input)
+
+                # Kernel size
+                kernel_label = QLabel("Kernel Size:")
+                kernel_input = QSpinBox()
+                kernel_input.setRange(1, 11)
+                kernel_input.setValue(3)
+                param_widgets["kernel_size"] = kernel_input
+                params_layout.addWidget(kernel_label)
+                params_layout.addWidget(kernel_input)
+
+                # Activation
+                activation_label = QLabel("Activation:")
+                activation_combo = QComboBox()
+                activation_combo.addItems(["relu", "sigmoid", "tanh", "softmax", "linear"])
+                param_widgets["activation"] = activation_combo
+                params_layout.addWidget(activation_label)
+                params_layout.addWidget(activation_combo)
+
+            elif layer_type == "MaxPooling2D":
+                # Pool size
+                pool_label = QLabel("Pool Size:")
+                pool_input = QSpinBox()
+                pool_input.setRange(1, 8)
+                pool_input.setValue(2)
+                param_widgets["pool_size"] = pool_input
+                params_layout.addWidget(pool_label)
+                params_layout.addWidget(pool_input)
+
+            elif layer_type == "Dropout":
+                # Rate
+                rate_label = QLabel("Dropout Rate:")
+                rate_input = QDoubleSpinBox()
+                rate_input.setRange(0.0, 0.9)
+                rate_input.setValue(0.5)
+                rate_input.setSingleStep(0.1)
+                param_widgets["rate"] = rate_input
+                params_layout.addWidget(rate_label)
+                params_layout.addWidget(rate_input)
+
+        # Connect layer type change to parameter update
+        type_combo.currentIndexChanged.connect(update_params)
+        update_params()  # Initial parameter setup
+
+        # Buttons
+        btn_layout = QHBoxLayout()
+        add_btn = QPushButton("Add Layer")
+        cancel_btn = QPushButton("Cancel")
+        btn_layout.addWidget(add_btn)
+        btn_layout.addWidget(cancel_btn)
+        layout.addLayout(btn_layout)
+
+        def add_layer():
+            layer_type = type_combo.currentText()
+            layer_params = {}
+
+            # Collect parameters based on layer type
+            if layer_type == "Dense":
+                layer_params = {
+                    "units": param_widgets["units"].value(),
+                    "activation": param_widgets["activation"].currentText()
+                }
+            elif layer_type == "Conv2D":
+                layer_params = {
+                    "filters": param_widgets["filters"].value(),
+                    "kernel_size": param_widgets["kernel_size"].value(),
+                    "activation": param_widgets["activation"].currentText()
+                }
+            elif layer_type == "MaxPooling2D":
+                layer_params = {
+                    "pool_size": param_widgets["pool_size"].value()
+                }
+            elif layer_type == "Dropout":
+                layer_params = {
+                    "rate": param_widgets["rate"].value()
+                }
+
+            # Add layer to configuration
+            self.layer_config.append({
+                "type": layer_type,
+                "params": layer_params
+            })
+
+            # Update layer list display
+            self.update_layer_list()
+            dialog.accept()
+
+        add_btn.clicked.connect(add_layer)
+        cancel_btn.clicked.connect(dialog.reject)
+
+        dialog.exec()
+
+    def load_efficient_mnist_config(self):
+        """Load a compute-efficient configuration for MNIST dataset"""
+        # Clear existing layer configuration
+        self.layer_config = []
+        
+        # Add layers for a simple but effective MNIST model
+        self.layer_config.extend([
+            {
+                "type": "Conv2D",
+                "params": {
+                    "filters": 32,
+                    "kernel_size": 3,
+                    "activation": "relu"
+                }
+            },
+            {
+                "type": "MaxPooling2D",
+                "params": {
+                    "pool_size": 2
+                }
+            },
+            {
+                "type": "Conv2D",
+                "params": {
+                    "filters": 64,
+                    "kernel_size": 3,
+                    "activation": "relu"
+                }
+            },
+            {
+                "type": "MaxPooling2D",
+                "params": {
+                    "pool_size": 2
+                }
+            },
+            {
+                "type": "Flatten",
+                "params": {}
+            },
+            {
+                "type": "Dense",
+                "params": {
+                    "units": 128,
+                    "activation": "relu"
+                }
+            },
+            {
+                "type": "Dropout",
+                "params": {
+                    "rate": 0.5
+                }
+            },
+            {
+                "type": "Dense",
+                "params": {
+                    "units": 10,
+                    "activation": "softmax"
+                }
+            }
+        ])
+        
+        # Update the layer list display
+        self.update_layer_list()
+        
+        # Set default training configuration
+        self.training_config = {
+            "batch_size": 64,
+            "epochs": 5,
+            "validation_split": 0.2,
+            "early_stopping": {
+                "enable": True,
+                "patience": 3,
+                "min_delta": 0.001
+            }
+        }
+        
+        # Create optimizer with default learning rate
+        self.optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
+        
+        self.status_bar.showMessage("Loaded compute-efficient MNIST configuration")
+
+    def stop_training(self):
+        """Stop the current training process"""
+        try:
+            if hasattr(self, 'model') and self.model is not None:
+                # Stop the training by setting a flag
+                self.training_stopped = True
+                
+                # Update UI
+                self.training_status.setText("Training stopped")
+                self.progress_bar.setValue(0)
+                self.status_bar.showMessage("Training stopped by user")
+                
+                # If using early stopping callback, we can also stop it
+                if hasattr(self, 'early_stopping_callback'):
+                    self.early_stopping_callback.stopped_epoch = self.current_epoch
+                    self.early_stopping_callback.model.stop_training = True
+        except Exception as e:
+            self.show_error(f"Error stopping training: {str(e)}")
+
+    def update_model_summary(self):
+        """Update the model summary text with detailed information about the model architecture"""
+        if not self.layer_config:
+            self.model_summary_text.setText("No model architecture defined yet.")
+            return
+
+        try:
+            # Create a temporary model
+            model = self.create_neural_network()
+            
+            # Determine input shape based on dataset
+            if self.X_train is not None:
+                input_shape = self.X_train.shape[1:]
+            else:
+                # Default input shape for MNIST
+                input_shape = (28, 28, 1)
+            
+            # Build the model with input shape
+            model.build(input_shape)
+            
+            # Get model summary as string
+            summary_list = []
+            model.summary(print_fn=lambda x: summary_list.append(x))
+            summary_text = "\n".join(summary_list)
+            
+            # Add additional information
+            total_params = model.count_params()
+            trainable_params = sum([np.prod(w.shape) for w in model.trainable_weights])
+            non_trainable_params = total_params - trainable_params
+            
+            # Format the summary text
+            summary_text = f"Model Architecture Summary:\n\n{summary_text}\n\n"
+            summary_text += f"Total Parameters: {total_params:,}\n"
+            summary_text += f"Trainable Parameters: {trainable_params:,}\n"
+            summary_text += f"Non-trainable Parameters: {non_trainable_params:,}\n\n"
+            
+            # Add layer details
+            summary_text += "Layer Details:\n"
+            for i, layer in enumerate(self.layer_config, 1):
+                summary_text += f"\n{i}. {layer['type']}\n"
+                for param_name, param_value in layer['params'].items():
+                    summary_text += f"   - {param_name}: {param_value}\n"
+            
+            # Add input shape information
+            summary_text += f"\nInput Shape: {input_shape}\n"
+            
+            self.model_summary_text.setText(summary_text)
+            
+        except Exception as e:
+            self.model_summary_text.setText(f"Error generating model summary: {str(e)}")
 
 def main():
     """Main function to start the application"""
