@@ -102,7 +102,7 @@ RMSprop:
   - Zoom Scaling
 
 📸 Screenshot:  
-![Augmentation Options](screenshots/augmetation.png)
+![Augmentation Options](screenshots/agumetation.png)
 
 
 
